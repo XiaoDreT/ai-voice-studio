@@ -742,103 +742,20 @@ export function extractStoryboardFromPagesWords(pagesWords: BboxWord[][]): Story
 }
 
 /**
- * Memuat modul PDF.js legacy secara dinamis dan aman untuk lingkungan serverless (Vercel).
+ * Memuat kelas PDFParse secara aman di lingkungan CommonJS maupun ESM/Serverless (Vercel).
  */
-async function loadPdfJsModule(): Promise<any> {
+async function getPdfParseClass(): Promise<any> {
   try {
-    const cjsIndex = require.resolve("pdf-parse");
-    const pdfjsLegacyPath = (require.resolve as any)(/*turbopackIgnore: true*/ "pdfjs-dist/legacy/build/pdf.mjs", {
-      paths: [path.dirname(cjsIndex), path.join(path.dirname(cjsIndex), "..", "..")],
-    });
-    return await import(/*turbopackIgnore: true*/ "file://" + pdfjsLegacyPath);
+    const mod = await import("pdf-parse");
+    return mod.PDFParse || (mod as any).default?.PDFParse || (mod as any).default || mod;
   } catch {
     try {
-      // @ts-ignore - Dynamic server import
-      return await import(/*turbopackIgnore: true*/ "pdfjs-dist/legacy/build/pdf.mjs");
+      const mod = require("pdf-parse");
+      return mod.PDFParse || mod.default?.PDFParse || mod.default || mod;
     } catch {
       return null;
     }
   }
-}
-
-/**
- * Ekstraksi tabel storyboard menggunakan PDF.js in-process parser.
- * Mengonversi seluruh teks halaman ke format koordinat BboxWord (X, Y) untuk
- * merekonstruksi tabel 3 kolom (Estimasi Waktu | Arahan Visual | Naskah Voice Over)
- * dengan presisi pixel tinggi tanpa membutuhkan binary poppler eksternal.
- */
-async function extractPdfStoryboardWithPdfJs(buffer: Buffer): Promise<StoryboardSegment[]> {
-  try {
-    const pdfjs = await loadPdfJsModule();
-    if (!pdfjs || !pdfjs.getDocument) return [];
-
-    const doc = await pdfjs.getDocument({
-      data: new Uint8Array(buffer),
-      useSystemFonts: true,
-      disableFontFace: true,
-      isEvalSupported: false,
-    }).promise;
-
-    const pagesWords: BboxWord[][] = [];
-    const allPageLines: string[] = [];
-
-    for (let i = 1; i <= doc.numPages; i++) {
-      const page = await doc.getPage(i);
-      const viewport = page.getViewport({ scale: 1.0 });
-      const textContent = await page.getTextContent();
-      const words: BboxWord[] = [];
-
-      for (const item of textContent.items as any[]) {
-        if (!item || !item.str || !item.str.trim()) continue;
-        const tx = typeof item.transform?.[4] === "number" ? item.transform[4] : 0;
-        const ty = typeof item.transform?.[5] === "number" ? item.transform[5] : 0;
-        const h = typeof item.height === "number" && item.height > 0 ? item.height : 10;
-        const w = typeof item.width === "number" && item.width > 0 ? item.width : 20;
-
-        words.push({
-          xmin: tx,
-          ymin: Math.max(0, viewport.height - ty - h),
-          xmax: tx + w,
-          ymax: Math.max(0, viewport.height - ty),
-          text: decodeHtmlAndXmlEntities(item.str.trim()),
-        });
-      }
-
-      if (words.length > 0) {
-        pagesWords.push(words);
-        const pageLines = groupWordsIntoLines(words);
-        for (const pl of pageLines) {
-          if (!isPageFooterOrMeta(pl.text)) {
-            allPageLines.push(pl.text);
-          }
-        }
-      }
-    }
-
-    // 1. Prioritas: Rekonstruksi struktur tabel 3 kolom berdasarkan koordinat geometris
-    if (pagesWords.length > 0) {
-      const bboxSegments = extractStoryboardFromPagesWords(pagesWords);
-      if (bboxSegments.length > 0) {
-        return bboxSegments;
-      }
-    }
-
-    // 2. Fallback: Ekstraksi baris teks dalam urutan baca alami
-    if (allPageLines.length > 0) {
-      const combined = allPageLines.join("\n");
-      let parsed = parseRawTimelineText(combined, false);
-      if (parsed.length === 0) {
-        parsed = parseRawTimelineText(combined, true);
-      }
-      if (parsed.length > 0) {
-        return parsed;
-      }
-    }
-  } catch (err) {
-    console.warn("[extractPdfStoryboardWithPdfJs] PDF.js extraction error:", err);
-  }
-
-  return [];
 }
 
 /**
@@ -867,47 +784,96 @@ function decodePdfHexString(hex: string): string {
 }
 
 /**
- * Ekstraksi teks PDF menggunakan paket resmi pdf-parse yang aman di lingkungan serverless.
+ * Ekstraksi tabel storyboard PDF menggunakan engine PDF.js in-process bawaan pdf-parse.
+ * Mengonversi seluruh teks halaman ke format koordinat BboxWord (X, Y) untuk
+ * merekonstruksi tabel 3 kolom (Estimasi Waktu | Arahan Visual | Naskah Voice Over)
+ * dengan presisi pixel tinggi dan ToUnicode CMap decoding lengkap, tanpa memerlukan binary poppler eksternal.
  */
 async function extractPdfStoryboardWithPdfParse(buffer: Buffer): Promise<StoryboardSegment[]> {
   try {
-    const pdfParseModule = await import("pdf-parse");
-    const PDFParse = pdfParseModule.PDFParse;
-    if (PDFParse) {
-      try {
-        const cjsIndex = require.resolve("pdf-parse");
-        const workerFile = path.join(path.dirname(cjsIndex), "pdf.worker.mjs");
-        if (fs.existsSync(workerFile)) {
-          PDFParse.setWorker(workerFile);
+    const PDFParse = await getPdfParseClass();
+    if (!PDFParse) return [];
+
+    const parser = new PDFParse({ data: buffer });
+    await parser.load();
+    const doc = parser.doc;
+
+    if (doc && typeof doc.numPages === "number" && doc.numPages > 0) {
+      const pagesWords: BboxWord[][] = [];
+      const allLines: string[] = [];
+
+      for (let i = 1; i <= doc.numPages; i++) {
+        const page = await doc.getPage(i);
+        const viewport = page.getViewport({ scale: 1.0 });
+        const textContent = await page.getTextContent();
+        const words: BboxWord[] = [];
+
+        for (const item of textContent.items as any[]) {
+          if (!item || !item.str || !item.str.trim()) continue;
+          const tx = typeof item.transform?.[4] === "number" ? item.transform[4] : 0;
+          const ty = typeof item.transform?.[5] === "number" ? item.transform[5] : 0;
+          const h = typeof item.height === "number" && item.height > 0 ? item.height : 10;
+          const w = typeof item.width === "number" && item.width > 0 ? item.width : 20;
+
+          words.push({
+            xmin: tx,
+            ymin: Math.max(0, viewport.height - ty - h),
+            xmax: tx + w,
+            ymax: Math.max(0, viewport.height - ty),
+            text: decodeHtmlAndXmlEntities(item.str.trim()),
+          });
         }
-      } catch {
-        // continue
+
+        if (words.length > 0) {
+          pagesWords.push(words);
+          const pageLines = groupWordsIntoLines(words);
+          for (const pl of pageLines) {
+            if (!isPageFooterOrMeta(pl.text)) {
+              allLines.push(pl.text);
+            }
+          }
+        }
       }
 
-      const parser = new PDFParse({ data: buffer });
-      const textData = await parser.getText();
-      const rawText = typeof textData === "string" ? textData : textData?.text || "";
-      if (rawText && rawText.trim()) {
-        const cleanText = rawText.replace(/--\s*\d+\s+of\s+\d+\s*--/gi, "").trim();
-        let parsed = parseRawTimelineText(cleanText, false);
-        if (parsed.length === 0) {
-          parsed = parseRawTimelineText(cleanText, true);
-        }
-        if (parsed.length > 0) {
-          return parsed;
+      // 1. Prioritas Utama: Bounding-box 3 kolom (Estimasi Waktu | Arahan Visual | Naskah Voice Over)
+      if (pagesWords.length > 0) {
+        const bboxSegments = extractStoryboardFromPagesWords(pagesWords);
+        if (bboxSegments.length > 0) {
+          return bboxSegments;
         }
       }
+
+      // 2. Fallback: Parse urutan baris hasil layout PDF
+      if (allLines.length > 0) {
+        const parsed = parseRawTimelineText(allLines.join("\n"), false);
+        if (parsed.length > 0) return parsed;
+      }
     }
-  } catch (e) {
-    console.warn("[extractPdfStoryboardWithPdfParse] Error:", e);
+
+    // 3. Fallback: Menggunakan parser.getText()
+    const textData = await parser.getText();
+    const rawText = typeof textData === "string" ? textData : textData?.text || "";
+    if (rawText && rawText.trim()) {
+      const cleanText = rawText.replace(/--\s*\d+\s+of\s+\d+\s*--/gi, "").trim();
+      let parsed = parseRawTimelineText(cleanText, false);
+      if (parsed.length === 0) {
+        parsed = parseRawTimelineText(cleanText, true);
+      }
+      if (parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn("[extractPdfStoryboardWithPdfParse] Error:", err);
   }
+
   return [];
 }
 
 /**
  * Ekstraksi stream teks PDF murni menggunakan Node.js built-in zlib.
  * Mendekompresi seluruh stream /FlateDecode dan mengekstrak teks asli
- * dari operator Tj / TJ (baik string biasa maupun hex), tanpa pernah memproses sintaks biner objek PDF.
+ * dari operator Tj / TJ (baik string biasa maupun hex).
  */
 function extractPdfStoryboardWithZlibStream(buffer: Buffer): StoryboardSegment[] {
   try {
@@ -989,11 +955,12 @@ function extractPdfStoryboardWithZlibStream(buffer: Buffer): StoryboardSegment[]
 
     if (textChunks.length > 0) {
       const combined = textChunks.join("\n");
-      let parsed = parseRawTimelineText(combined, false);
-      if (parsed.length === 0) {
-        parsed = parseRawTimelineText(combined, true);
-      }
-      if (parsed.length > 0) {
+      const parsed = parseRawTimelineText(combined, false);
+      // Validasi ketat: hanya terima jika terdapat rentang waktu valid dan tidak berisi karakter font-shift terenkripsi
+      if (
+        parsed.length > 0 &&
+        parsed.every((s) => s.time_range && s.text && !/^[A-Z0-9\s>\\<]{15,}$/.test(s.text.slice(0, 30)))
+      ) {
         return parsed;
       }
     }
@@ -1006,14 +973,24 @@ function extractPdfStoryboardWithZlibStream(buffer: Buffer): StoryboardSegment[]
 
 /**
  * Ekstraksi tabel storyboard dari PDF dengan pendekatan multi-tier yang sangat tangguh:
- * 1. pdftotext -bbox (poppler-utils) -> Presisi koordinat 3 kolom jika tersedia di server
- * 2. PDF.js Bounding-Box Parser -> Presisi tinggi murni JavaScript (jika pdfjs-dist tersedia)
- * 3. PDFParse (Pustaka resmi pdf-parse dengan bundle worker) -> 100% aman dan teruji di Vercel
- * 4. pdftotext -layout & standard -> Fallback layout multi-spasi
- * 5. Pure Node.js Zlib Stream Decompressor -> Fallback dekompresi FlateDecode tanpa ketergantungan luar
+ * 1. PDFParse (Engine PDF.js in-process) -> Presisi tinggi 3 kolom geometris, 100% aman di Vercel Serverless
+ * 2. pdftotext -bbox (poppler-utils) -> Fallback koordinat jika poppler tersedia di sistem OS
+ * 3. pdftotext -layout & standard -> Fallback layout multi-spasi
+ * 4. Pure Node.js Zlib Stream Decompressor -> Fallback dekompresi FlateDecode murni
  */
 export async function parsePdfStoryboard(buffer: Buffer): Promise<StoryboardSegment[]> {
-  // Tier 1: Coba pdftotext -bbox (poppler-utils)
+  // Tier 1: PDFParse (Pustaka resmi pdf-parse dengan engine PDF.js in-process)
+  // Berjalan 100% di serverless (Vercel) tanpa dependensi binary OS eksternal
+  try {
+    const pdfParseSegments = await extractPdfStoryboardWithPdfParse(buffer);
+    if (pdfParseSegments.length > 0) {
+      return pdfParseSegments;
+    }
+  } catch (err) {
+    console.warn("[parsePdfStoryboard] pdf-parse extraction error:", err);
+  }
+
+  // Tier 2: Coba pdftotext -bbox (poppler-utils) jika tersedia di server OS
   try {
     const resBbox = spawnSync("pdftotext", ["-bbox", "-", "-"], {
       input: buffer,
@@ -1061,27 +1038,7 @@ export async function parsePdfStoryboard(buffer: Buffer): Promise<StoryboardSegm
     // pdftotext tidak tersedia, lanjut ke tier berikutnya
   }
 
-  // Tier 2: PDF.js In-Process Bounding-Box Parser (Universal, jika modul pdfjs-dist dapat diakses)
-  try {
-    const pdfJsSegments = await extractPdfStoryboardWithPdfJs(buffer);
-    if (pdfJsSegments.length > 0) {
-      return pdfJsSegments;
-    }
-  } catch (err) {
-    console.warn("[parsePdfStoryboard] PDF.js extraction error:", err);
-  }
-
-  // Tier 3: PDFParse (Pustaka resmi pdf-parse dengan konfigurasi worker aman untuk Vercel Serverless)
-  try {
-    const pdfParseSegments = await extractPdfStoryboardWithPdfParse(buffer);
-    if (pdfParseSegments.length > 0) {
-      return pdfParseSegments;
-    }
-  } catch (err) {
-    console.warn("[parsePdfStoryboard] pdf-parse extraction error:", err);
-  }
-
-  // Tier 4: Coba pdftotext -layout
+  // Tier 3: Coba pdftotext -layout
   try {
     const resLayout = spawnSync("pdftotext", ["-layout", "-", "-"], {
       input: buffer,
@@ -1102,7 +1059,7 @@ export async function parsePdfStoryboard(buffer: Buffer): Promise<StoryboardSegm
     // Abaikan jika pdftotext tidak tersedia
   }
 
-  // Tier 5: Pure Node.js Zlib Stream Decompressor (Zero external dependencies)
+  // Tier 4: Pure Node.js Zlib Stream Decompressor (Hanya jika teks valid dengan rentang waktu)
   const zlibSegments = extractPdfStoryboardWithZlibStream(buffer);
   if (zlibSegments.length > 0) {
     return zlibSegments;
