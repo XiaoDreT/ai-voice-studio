@@ -842,9 +842,72 @@ async function extractPdfStoryboardWithPdfJs(buffer: Buffer): Promise<Storyboard
 }
 
 /**
+ * Dekode string hexadesimal dari stream PDF (misal <00480065006C006C006F>)
+ */
+function decodePdfHexString(hex: string): string {
+  try {
+    let clean = hex.replace(/[\s<>]/g, "");
+    if (!clean) return "";
+    if (clean.length % 2 !== 0) clean += "0";
+    const buf = Buffer.from(clean, "hex");
+    if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+      const slice = Buffer.from(buf.subarray(2));
+      slice.swap16();
+      return slice.toString("utf16le");
+    }
+    if (buf.length >= 2 && buf[0] === 0x00 && buf[1] > 0) {
+      const copy = Buffer.from(buf);
+      copy.swap16();
+      return copy.toString("utf16le");
+    }
+    return buf.toString("latin1");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Ekstraksi teks PDF menggunakan paket resmi pdf-parse yang aman di lingkungan serverless.
+ */
+async function extractPdfStoryboardWithPdfParse(buffer: Buffer): Promise<StoryboardSegment[]> {
+  try {
+    const pdfParseModule = await import("pdf-parse");
+    const PDFParse = pdfParseModule.PDFParse;
+    if (PDFParse) {
+      try {
+        const cjsIndex = require.resolve("pdf-parse");
+        const workerFile = path.join(path.dirname(cjsIndex), "pdf.worker.mjs");
+        if (fs.existsSync(workerFile)) {
+          PDFParse.setWorker(workerFile);
+        }
+      } catch {
+        // continue
+      }
+
+      const parser = new PDFParse({ data: buffer });
+      const textData = await parser.getText();
+      const rawText = typeof textData === "string" ? textData : textData?.text || "";
+      if (rawText && rawText.trim()) {
+        const cleanText = rawText.replace(/--\s*\d+\s+of\s+\d+\s*--/gi, "").trim();
+        let parsed = parseRawTimelineText(cleanText, false);
+        if (parsed.length === 0) {
+          parsed = parseRawTimelineText(cleanText, true);
+        }
+        if (parsed.length > 0) {
+          return parsed;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[extractPdfStoryboardWithPdfParse] Error:", e);
+  }
+  return [];
+}
+
+/**
  * Ekstraksi stream teks PDF murni menggunakan Node.js built-in zlib.
  * Mendekompresi seluruh stream /FlateDecode dan mengekstrak teks asli
- * dari operator Tj / TJ, tanpa pernah memproses sintaks biner objek PDF.
+ * dari operator Tj / TJ (baik string biasa maupun hex), tanpa pernah memproses sintaks biner objek PDF.
  */
 function extractPdfStoryboardWithZlibStream(buffer: Buffer): StoryboardSegment[] {
   try {
@@ -889,18 +952,33 @@ function extractPdfStoryboardWithZlibStream(buffer: Buffer): StoryboardSegment[]
           }
         }
 
-        // Operator TJ: [(text1) 20 (text2)] TJ
+        // Operator Tj hex: <hex> Tj
+        const tjHexRegex = /<([0-9a-fA-F]+)>\s*Tj/g;
+        while ((m = tjHexRegex.exec(decompressed)) !== null) {
+          const decoded = decodeHtmlAndXmlEntities(decodePdfHexString(m[1])).trim();
+          if (decoded && !isTableHeaderOrMeta(decoded) && !isPageFooterOrMeta(decoded)) {
+            textChunks.push(decoded);
+          }
+        }
+
+        // Operator TJ: [(text1) 20 (text2)] TJ atau [<hex> 20 <hex>] TJ
         const tjArrayRegex = /\[([^\]]+)\]\s*TJ/g;
         while ((m = tjArrayRegex.exec(decompressed)) !== null) {
           const inner = m[1];
-          const subMatches = inner.match(/\(([^)]+)\)/g);
-          if (subMatches) {
-            const line = subMatches
-              .map((s) => s.slice(1, -1).replace(/\\([()\\])/g, "$1"))
-              .join("");
-            const decoded = decodeHtmlAndXmlEntities(line).trim();
-            if (decoded && !isTableHeaderOrMeta(decoded) && !isPageFooterOrMeta(decoded)) {
-              textChunks.push(decoded);
+          const tokenRegex = /\(([^)]+)\)|<([0-9a-fA-F]+)>/g;
+          let subM: RegExpExecArray | null;
+          const lineParts: string[] = [];
+          while ((subM = tokenRegex.exec(inner)) !== null) {
+            if (subM[1] !== undefined) {
+              lineParts.push(subM[1].replace(/\\([()\\])/g, "$1"));
+            } else if (subM[2] !== undefined) {
+              lineParts.push(decodePdfHexString(subM[2]));
+            }
+          }
+          if (lineParts.length > 0) {
+            const line = decodeHtmlAndXmlEntities(lineParts.join("")).trim();
+            if (line && !isTableHeaderOrMeta(line) && !isPageFooterOrMeta(line)) {
+              textChunks.push(line);
             }
           }
         }
@@ -929,9 +1007,10 @@ function extractPdfStoryboardWithZlibStream(buffer: Buffer): StoryboardSegment[]
 /**
  * Ekstraksi tabel storyboard dari PDF dengan pendekatan multi-tier yang sangat tangguh:
  * 1. pdftotext -bbox (poppler-utils) -> Presisi koordinat 3 kolom jika tersedia di server
- * 2. PDF.js Bounding-Box Parser -> Presisi tinggi murni JavaScript, 100% aman untuk Vercel Serverless
- * 3. pdftotext -layout & standard -> Fallback layout multi-spasi
- * 4. Pure Node.js Zlib Stream Decompressor -> Fallback dekompresi FlateDecode tanpa ketergantungan luar
+ * 2. PDF.js Bounding-Box Parser -> Presisi tinggi murni JavaScript (jika pdfjs-dist tersedia)
+ * 3. PDFParse (Pustaka resmi pdf-parse dengan bundle worker) -> 100% aman dan teruji di Vercel
+ * 4. pdftotext -layout & standard -> Fallback layout multi-spasi
+ * 5. Pure Node.js Zlib Stream Decompressor -> Fallback dekompresi FlateDecode tanpa ketergantungan luar
  */
 export async function parsePdfStoryboard(buffer: Buffer): Promise<StoryboardSegment[]> {
   // Tier 1: Coba pdftotext -bbox (poppler-utils)
@@ -979,10 +1058,10 @@ export async function parsePdfStoryboard(buffer: Buffer): Promise<StoryboardSegm
       }
     }
   } catch {
-    // pdftotext tidak tersedia, lanjut ke Tier 2
+    // pdftotext tidak tersedia, lanjut ke tier berikutnya
   }
 
-  // Tier 2: PDF.js In-Process Bounding-Box Parser (Universal, 100% Serverless & Pure JS, Aman di Vercel)
+  // Tier 2: PDF.js In-Process Bounding-Box Parser (Universal, jika modul pdfjs-dist dapat diakses)
   try {
     const pdfJsSegments = await extractPdfStoryboardWithPdfJs(buffer);
     if (pdfJsSegments.length > 0) {
@@ -992,7 +1071,17 @@ export async function parsePdfStoryboard(buffer: Buffer): Promise<StoryboardSegm
     console.warn("[parsePdfStoryboard] PDF.js extraction error:", err);
   }
 
-  // Tier 3: Coba pdftotext -layout
+  // Tier 3: PDFParse (Pustaka resmi pdf-parse dengan konfigurasi worker aman untuk Vercel Serverless)
+  try {
+    const pdfParseSegments = await extractPdfStoryboardWithPdfParse(buffer);
+    if (pdfParseSegments.length > 0) {
+      return pdfParseSegments;
+    }
+  } catch (err) {
+    console.warn("[parsePdfStoryboard] pdf-parse extraction error:", err);
+  }
+
+  // Tier 4: Coba pdftotext -layout
   try {
     const resLayout = spawnSync("pdftotext", ["-layout", "-", "-"], {
       input: buffer,
@@ -1013,7 +1102,7 @@ export async function parsePdfStoryboard(buffer: Buffer): Promise<StoryboardSegm
     // Abaikan jika pdftotext tidak tersedia
   }
 
-  // Tier 4: Pure Node.js Zlib Stream Decompressor (Zero external dependencies)
+  // Tier 5: Pure Node.js Zlib Stream Decompressor (Zero external dependencies)
   const zlibSegments = extractPdfStoryboardWithZlibStream(buffer);
   if (zlibSegments.length > 0) {
     return zlibSegments;
@@ -1169,7 +1258,7 @@ export async function parseStoryboardBuffer(
   const ext = (fileName.split(".").pop() || "").toLowerCase();
 
   // 1. PDF Document
-  if (ext === "pdf") {
+  if (ext === "pdf" || buffer.slice(0, 4).toString() === "%PDF") {
     return await parsePdfStoryboard(buffer);
   }
 
