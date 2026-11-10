@@ -113,23 +113,9 @@ async function muxDubbedVideo(opts: MuxDubbedOptions): Promise<boolean> {
       outDubPath,
     ];
   } else {
-    const vf = subFilter ? subFilter : "null";
-
-    ffmpegArgs = [
-      "-y",
-      "-threads", "2",
-      "-f", "lavfi",
-      "-i", "color=c=0x0b132b:s=1280x720:r=25",
-      "-i", savedAudioPath,
-      "-vf", vf,
-      "-c:v", "libx264",
-      "-preset", "ultrafast",
-      "-pix_fmt", "yuv420p",
-      "-c:a", "aac",
-      "-b:a", "128k",
-      "-t", String(totalDurationSec),
-      outDubPath,
-    ];
+    // Tanpa file video fisik di filesystem server, jangan buat video dummy layar biru.
+    // Pemutar di browser client memutar video lokal user secara instan & presisi dengan audio voice over AI & subtitle overlay.
+    return false;
   }
 
   return new Promise<boolean>((resolve) => {
@@ -358,27 +344,60 @@ export async function POST(request: Request) {
 
     const audioUrl = `/api/files/${audioFileName}`;
     const srtUrl = `/api/files/${srtFileName}`;
+    const ffmpegBin = getFfmpegBinary();
+
+    // 2. Buat versi audio MP3 fleksibel (192kbps) di samping file WAV master
+    const mp3FileName = `${baseName}.mp3`;
+    const outMp3Path = path.join(getOutputDir(), mp3FileName);
+    let mp3Url: string | undefined;
+
+    try {
+      const mp3Ok = await new Promise<boolean>((resolve) => {
+        const proc = spawn(/*turbopackIgnore: true*/ ffmpegBin, [
+          "-y",
+          "-threads", "2",
+          "-i", savedAudioPath,
+          "-c:a", "libmp3lame",
+          "-b:a", "192k",
+          outMp3Path,
+        ]);
+        proc.on("close", (code) => {
+          resolve(code === 0 && fs.existsSync(outMp3Path) && fs.statSync(outMp3Path).size > 0);
+        });
+        proc.on("error", (e) => {
+          console.warn("[timeline] FFmpeg mp3 conversion error:", e);
+          resolve(false);
+        });
+      });
+
+      if (mp3Ok) {
+        mp3Url = `/api/files/${mp3FileName}`;
+      }
+    } catch (err) {
+      console.warn("[timeline] MP3 generation failed:", err);
+    }
 
     let dubbedVideoUrl: string | undefined;
 
-    // 2. Gabungkan (mux/dubbing) video, master audio timeline, dan subtitle dengan FFmpeg
+    // 3. Gabungkan (mux/dubbing) video acuan jika ada file fisik di server
     const resolvedVPath = resolveVideoPath(videoPath);
     const dubbedFileName = `${baseName}_dubbed.mp4`;
     const outDubPath = path.join(getOutputDir(), dubbedFileName);
-    const ffmpegBin = getFfmpegBinary();
 
-    const dubbedOk = await muxDubbedVideo({
-      ffmpegBin,
-      savedAudioPath,
-      savedAssPath,
-      resolvedVPath,
-      outDubPath,
-      totalDurationSec: tlResult.totalTimelineSec,
-      burnSubtitles,
-    });
+    if (resolvedVPath) {
+      const dubbedOk = await muxDubbedVideo({
+        ffmpegBin,
+        savedAudioPath,
+        savedAssPath,
+        resolvedVPath,
+        outDubPath,
+        totalDurationSec: tlResult.totalTimelineSec,
+        burnSubtitles,
+      });
 
-    if (dubbedOk) {
-      dubbedVideoUrl = `/api/files/${dubbedFileName}`;
+      if (dubbedOk) {
+        dubbedVideoUrl = `/api/files/${dubbedFileName}`;
+      }
     }
 
     const fullScriptSummary = tlResult.segmentReports
@@ -401,8 +420,9 @@ export async function POST(request: Request) {
         speed: speed ?? 1,
         use_speaker_boost: useSpeakerBoost !== false,
       },
-      output_format: "pcm_24000 (WAV Timeline)",
+      output_format: "pcm_24000 (WAV Timeline) + MP3 192k",
       audio_url: audioUrl,
+      mp3_url: mp3Url,
       srt_url: srtUrl,
       video_url: dubbedVideoUrl,
       size_bytes: tlResult.wavBuffer.length,
@@ -412,6 +432,7 @@ export async function POST(request: Request) {
     return NextResponse.json({
       success: true,
       audioUrl,
+      mp3Url,
       srtUrl,
       dubbedVideoUrl,
       totalTimelineSec: tlResult.totalTimelineSec,

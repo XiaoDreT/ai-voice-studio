@@ -98,17 +98,27 @@ export const HistoryTab: React.FC = () => {
 
               {/* Media Player and Downloads */}
               <div className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto shrink-0">
-                {item.audio_url && (
-                  <audio controls src={item.audio_url} className="w-full sm:w-56 h-8" />
+                {(item.mp3_url || item.audio_url) && (
+                  <audio controls src={item.mp3_url || item.audio_url} className="w-full sm:w-56 h-8" />
                 )}
 
                 <div className="flex gap-2">
+                  {item.mp3_url && (
+                    <a
+                      href={item.mp3_url}
+                      download
+                      className="p-2 rounded-lg bg-purple-950/60 hover:bg-purple-900 border border-purple-800 text-purple-300 hover:text-white transition"
+                      title="Unduh Audio (.MP3)"
+                    >
+                      <Volume2 className="w-4 h-4" />
+                    </a>
+                  )}
                   {item.audio_url && (
                     <a
                       href={item.audio_url}
                       download
                       className="p-2 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-blue-400 hover:text-white transition"
-                      title="Unduh Audio"
+                      title={item.mp3_url ? "Unduh Audio Master (.WAV)" : "Unduh Audio"}
                     >
                       <Volume2 className="w-4 h-4" />
                     </a>

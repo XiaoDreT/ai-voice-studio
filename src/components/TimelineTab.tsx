@@ -116,6 +116,7 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
   const [progressMsg, setProgressMsg] = useState<string>("");
   const [timelineResult, setTimelineResult] = useState<{
     audioUrl: string;
+    mp3Url?: string;
     srtUrl?: string;
     dubbedVideoUrl?: string;
     totalTimelineSec: number;
@@ -135,11 +136,30 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
   const [uploadDocMsg, setUploadDocMsg] = useState<string | null>(null);
   const [isUploadingVideo, setIsUploadingVideo] = useState<boolean>(false);
 
-  // Video player ref
+  // Video player ref (top preview player)
   const videoRef = useRef<HTMLVideoElement>(null);
   const dubbedAudioRef = useRef<HTMLAudioElement>(null);
   const [serverVideoPath, setServerVideoPath] = useState<string | null>(null);
   const [activePlayerMode, setActivePlayerMode] = useState<"original" | "dubbed">("original");
+
+  // Result card video player refs (bottom hero player)
+  const resultVideoRef = useRef<HTMLVideoElement>(null);
+  const resultAudioRef = useRef<HTMLAudioElement>(null);
+  const [resultVideoTime, setResultVideoTime] = useState<number>(0);
+
+  // Cari segmen aktif pada detik video hasil generate (bottom player)
+  const activeSegmentAtResultTime = React.useMemo(() => {
+    for (const s of segments) {
+      const [start, end] = parseTimeRangeStr(s.time_range);
+      if (resultVideoTime >= start && resultVideoTime <= end) {
+        return s;
+      }
+    }
+    return null;
+  }, [segments, resultVideoTime]);
+  const resultEffectiveSegment =
+    activeSegmentAtResultTime || segments.find((s) => s.text.trim()) || segments[0];
+  const resultSubtitleText = resultEffectiveSegment?.text || "";
 
   // Muat hasil generate timeline terakhir dari history saat pertama kali dibuka (jika ada)
   useEffect(() => {
@@ -149,12 +169,13 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
         const data = await res.json();
         if (Array.isArray(data)) {
           const latest = data.find(
-            (item: { mode?: string; audio_url?: string; video_url?: string; elapsed_sec?: number }) =>
-              item.mode === "timeline_tts" && item.audio_url
+            (item: { mode?: string; audio_url?: string; mp3_url?: string; video_url?: string; elapsed_sec?: number }) =>
+              item.mode === "timeline_tts" && (item.audio_url || item.mp3_url)
           );
           if (latest) {
             setTimelineResult({
               audioUrl: latest.audio_url,
+              mp3Url: latest.mp3_url,
               srtUrl: latest.srt_url,
               dubbedVideoUrl: latest.video_url,
               totalTimelineSec: 102,
@@ -1410,25 +1431,165 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
                   <span className="text-base">🎬</span>
                   <div>
                     <h5 className="text-sm font-bold text-white">
-                      Sinkronisasi Video + Suara Narasi AI + Subtitle Aktif
+                      Video Lengkap (Video Acuan + Suara AI + Subtitle)
                     </h5>
                     <p className="text-[11px] text-slate-400">
-                      Video acuan Anda telah terhubung secara presisi dengan Voice Over AI & subtitle otomatis di pemutar di atas.
+                      Telah diselaraskan secara presisi antara video acuan Anda, narasi voice over AI ElevenLabs, dan subtitle otomatis.
                     </p>
                   </div>
                 </div>
                 <span className="text-[11px] font-mono bg-emerald-950/60 border border-emerald-800/50 text-emerald-300 px-2.5 py-1 rounded-lg">
-                  ⚡ Live Interactive Sync
+                  ⚡ Live Interactive Sync • HD
                 </span>
               </div>
 
-              <div className="text-xs bg-slate-900 border border-slate-800 rounded-xl p-4 text-slate-300 flex items-start gap-3">
-                <span className="text-lg">✨</span>
-                <div>
-                  <p className="font-semibold text-white">Pratinjau Instan Berjalan di Pemutar Video Acuan</p>
-                  <p className="text-slate-400 mt-0.5 leading-relaxed">
-                    Pemutar video di atas otomatis beralih ke mode <strong>&ldquo;🎬 Video + Suara AI (Voice Over)&rdquo;</strong> dengan subtitle presisi. Anda dapat memutar video di atas untuk melihat hasilnya secara langsung, atau mengunduh master audio narasi WAV dan file subtitle SRT di bawah untuk kebutuhan editing Anda.
-                  </p>
+              {/* Pemutar Video Terintegrasi dengan Sinkronisasi Audio Voice Over & Subtitle Overlay */}
+              <div className="relative rounded-lg overflow-hidden bg-black aspect-video max-h-[460px] mx-auto border border-slate-800 flex items-center justify-center">
+                <video
+                  ref={resultVideoRef}
+                  controls
+                  playsInline
+                  src={activeVideoUrl}
+                  className="w-full h-full object-contain"
+                  muted={true}
+                  onTimeUpdate={(e) => {
+                    const cur = e.currentTarget.currentTime;
+                    setResultVideoTime(cur);
+                    if (resultAudioRef.current) {
+                      if (Math.abs(resultAudioRef.current.currentTime - cur) > 0.3) {
+                        resultAudioRef.current.currentTime = cur;
+                      }
+                    }
+                  }}
+                  onPlay={() => {
+                    if (resultAudioRef.current) {
+                      resultAudioRef.current.currentTime = resultVideoRef.current?.currentTime || 0;
+                      resultAudioRef.current.play().catch(() => {});
+                    }
+                  }}
+                  onPause={() => {
+                    if (resultAudioRef.current) {
+                      resultAudioRef.current.pause();
+                    }
+                  }}
+                  onSeeked={() => {
+                    if (resultAudioRef.current && resultVideoRef.current) {
+                      resultAudioRef.current.currentTime = resultVideoRef.current.currentTime;
+                    }
+                  }}
+                  onVolumeChange={() => {
+                    if (resultAudioRef.current && resultVideoRef.current) {
+                      resultAudioRef.current.volume = resultVideoRef.current.volume;
+                    }
+                  }}
+                />
+
+                {/* Audio track sinkron */}
+                {timelineResult.audioUrl && (
+                  <audio
+                    ref={resultAudioRef}
+                    src={timelineResult.mp3Url || timelineResult.audioUrl}
+                    className="hidden"
+                    preload="auto"
+                  />
+                )}
+
+                {/* Subtitle Overlay presisi di atas player hasil */}
+                {burnSubtitles && showLiveSubtitleOnPlayer && (
+                  <div className="absolute inset-0 pointer-events-none overflow-hidden select-none z-10">
+                    <div
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        width: "1280px",
+                        height: "720px",
+                        transform: `scale(${previewScale})`,
+                        transformOrigin: "top left",
+                        display: "flex",
+                        flexDirection: "column",
+                        justifyContent: "flex-end",
+                        alignItems: "center",
+                        paddingBottom: `${subtitleYpad}px`,
+                        paddingLeft: "70px",
+                        paddingRight: "70px",
+                        boxSizing: "border-box",
+                      }}
+                    >
+                      {resultSubtitleText && (
+                        <div
+                          style={{
+                            fontSize: `${subtitleFontSize}px`,
+                            fontWeight: "bold",
+                            lineHeight: 1.25,
+                            textAlign: "center",
+                            maxWidth: "1140px",
+                            fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
+                            letterSpacing: "0.01em",
+                            ...(subtitleStyle === "shaded_box"
+                              ? {
+                                  color: "#ffffff",
+                                  backgroundColor: "rgba(11, 19, 43, 0.90)",
+                                  padding: "6px 18px",
+                                  borderRadius: "6px",
+                                  boxShadow: "0 6px 18px rgba(0, 0, 0, 0.6)",
+                                }
+                              : subtitleStyle === "yellow_outline"
+                              ? {
+                                  color: "#ffff00",
+                                  textShadow:
+                                    "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 3px 6px rgba(0,0,0,0.8)",
+                                }
+                              : {
+                                  color: "#ffffff",
+                                  textShadow:
+                                    "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 3px 6px rgba(0,0,0,0.8)",
+                                }),
+                          }}
+                        >
+                          {resultSubtitleText}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Download Buttons Bar */}
+              <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                <div className="text-xs text-slate-400 flex items-center gap-2">
+                  <span>💡</span>
+                  <span>Video diputar langsung dengan narasi suara AI & subtitle tersinkronisasi presisi.</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {timelineResult.mp3Url && (
+                    <a
+                      href={timelineResult.mp3Url}
+                      download={`${featureName || "timeline_audio"}.mp3`}
+                      className="bg-purple-600 hover:bg-purple-500 text-white px-4 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-md shadow-purple-600/30"
+                    >
+                      <Download className="w-4 h-4" />
+                      Unduh Audio (.MP3)
+                    </a>
+                  )}
+                  <a
+                    href={timelineResult.audioUrl}
+                    download={`${featureName || "timeline_audio"}.wav`}
+                    className="bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 px-4 py-2.5 rounded-xl text-xs font-medium flex items-center justify-center gap-2 transition"
+                  >
+                    <Download className="w-4 h-4 text-blue-400" />
+                    Unduh Audio (.WAV)
+                  </a>
+                  {timelineResult.srtUrl && (
+                    <a
+                      href={timelineResult.srtUrl}
+                      download={`${featureName || "subtitle"}.srt`}
+                      className="bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 px-4 py-2.5 rounded-xl text-xs font-medium flex items-center justify-center gap-2 transition"
+                    >
+                      <Download className="w-4 h-4 text-emerald-400" />
+                      Unduh Subtitle (.SRT)
+                    </a>
+                  )}
                 </div>
               </div>
             </div>
@@ -1442,17 +1603,31 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
                 <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
                   🎧 Master Audio Voice Over Saja
                 </span>
-                <span className="text-[10px] text-slate-500 font-mono">WAV 24kHz</span>
+                <span className="text-[10px] text-slate-500 font-mono">
+                  {timelineResult.mp3Url ? "MP3 192k • WAV 24k" : "WAV 24kHz"}
+                </span>
               </div>
-              <audio controls src={timelineResult.audioUrl} className="w-full" />
-              <div className="pt-1">
+              <audio controls src={timelineResult.mp3Url || timelineResult.audioUrl} className="w-full" />
+              <div className="pt-1 flex flex-col sm:flex-row gap-2">
+                {timelineResult.mp3Url && (
+                  <a
+                    href={timelineResult.mp3Url}
+                    download={`${featureName || "timeline_audio"}.mp3`}
+                    className="flex-1 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white px-3 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-sm"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Unduh Audio (.MP3)
+                  </a>
+                )}
                 <a
                   href={timelineResult.audioUrl}
                   download={`${featureName || "timeline_audio"}.wav`}
-                  className="w-full bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition"
+                  className={`flex-1 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 px-3 py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition ${
+                    !timelineResult.mp3Url ? "w-full" : ""
+                  }`}
                 >
                   <Download className="w-3.5 h-3.5 text-blue-400" />
-                  Unduh Master Audio (.WAV)
+                  Unduh Audio (.WAV)
                 </a>
               </div>
             </div>

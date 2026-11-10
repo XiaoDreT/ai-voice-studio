@@ -742,57 +742,18 @@ export function extractStoryboardFromPagesWords(pagesWords: BboxWord[][]): Story
 }
 
 /**
- * Memastikan worker PDF.js dimuat secara in-process di lingkungan serverless (Vercel).
- */
-async function ensurePdfJsWorker(): Promise<string | null> {
-  if ((globalThis as any).pdfjsWorker?.WorkerMessageHandler) return null;
-
-  const candidatePaths = [
-    path.join(process.cwd(), "src/lib/pdf.worker.mjs"),
-    path.join(__dirname, "pdf.worker.mjs"),
-  ];
-
-  try {
-    const cjsIndex = require.resolve("pdf-parse");
-    candidatePaths.push(path.join(path.dirname(cjsIndex), "pdf.worker.mjs"));
-  } catch {}
-
-  for (const p of candidatePaths) {
-    if (fs.existsSync(/*turbopackIgnore: true*/ p)) {
-      try {
-        (globalThis as any).pdfjsWorker = await import(/*turbopackIgnore: true*/ "file://" + p);
-        return p;
-      } catch {}
-    }
-  }
-
-  return null;
-}
-
-/**
  * Memuat kelas PDFParse secara aman di lingkungan CommonJS maupun ESM/Serverless (Vercel).
+ * pdf-parse v2 menyertakan worker inline data URI secara bawaan,
+ * sehingga dapat berjalan 100% in-process tanpa spawning thread worker eksternal di Vercel Lambda.
  */
 async function getPdfParseClass(): Promise<any> {
-  const workerFile = await ensurePdfJsWorker();
   try {
     const mod = await import("pdf-parse");
-    const cls = mod.PDFParse || (mod as any).default?.PDFParse || (mod as any).default || mod;
-    if (cls && workerFile && typeof cls.setWorker === "function") {
-      try {
-        cls.setWorker(workerFile);
-      } catch {}
-    }
-    return cls;
+    return mod.PDFParse || (mod as any).default?.PDFParse || (mod as any).default || mod;
   } catch {
     try {
       const mod = require("pdf-parse");
-      const cls = mod.PDFParse || mod.default?.PDFParse || mod.default || mod;
-      if (cls && workerFile && typeof cls.setWorker === "function") {
-        try {
-          cls.setWorker(workerFile);
-        } catch {}
-      }
-      return cls;
+      return mod.PDFParse || mod.default?.PDFParse || mod.default || mod;
     } catch {
       return null;
     }
@@ -1029,6 +990,29 @@ export async function parsePdfStoryboard(buffer: Buffer): Promise<StoryboardSegm
     }
   } catch (err) {
     console.warn("[parsePdfStoryboard] pdf-parse extraction error:", err);
+  }
+
+  // Tier 1b: Fallback langsung ke PDFParse getText()
+  try {
+    const PDFParse = await getPdfParseClass();
+    if (PDFParse) {
+      const parser = new PDFParse({ data: new Uint8Array(buffer) });
+      await parser.load();
+      const textData = await parser.getText();
+      const rawText = typeof textData === "string" ? textData : textData?.text || "";
+      if (rawText && rawText.trim()) {
+        const cleanText = rawText.replace(/--\s*\d+\s+of\s+\d+\s*--/gi, "").trim();
+        let parsed = parseRawTimelineText(cleanText, false);
+        if (parsed.length === 0) {
+          parsed = parseRawTimelineText(cleanText, true);
+        }
+        if (parsed.length > 0) {
+          return parsed;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("[parsePdfStoryboard] pdf-parse simple fallback error:", err);
   }
 
   // Tier 2: Coba pdftotext -bbox (poppler-utils) jika tersedia di server OS

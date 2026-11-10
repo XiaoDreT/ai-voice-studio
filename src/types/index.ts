@@ -48,6 +48,7 @@ export interface HistoryItem {
   settings?: VoiceSetting;
   output_format?: string;
   audio_url?: string;
+  mp3_url?: string;
   srt_url?: string;
   video_url?: string;
   size_bytes?: number;
