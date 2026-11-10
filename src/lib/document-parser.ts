@@ -746,15 +746,15 @@ export function extractStoryboardFromPagesWords(pagesWords: BboxWord[][]): Story
  */
 async function loadPdfJsModule(): Promise<any> {
   try {
-    // @ts-ignore - Dynamic server import
-    return await import(/*turbopackIgnore: true*/ "pdfjs-dist/legacy/build/pdf.mjs");
+    const cjsIndex = require.resolve("pdf-parse");
+    const pdfjsLegacyPath = (require.resolve as any)(/*turbopackIgnore: true*/ "pdfjs-dist/legacy/build/pdf.mjs", {
+      paths: [path.dirname(cjsIndex), path.join(path.dirname(cjsIndex), "..", "..")],
+    });
+    return await import(/*turbopackIgnore: true*/ "file://" + pdfjsLegacyPath);
   } catch {
     try {
-      const cjsIndex = require.resolve("pdf-parse");
-      const pdfjsLegacyPath = (require.resolve as any)(/*turbopackIgnore: true*/ "pdfjs-dist/legacy/build/pdf.mjs", {
-        paths: [path.dirname(cjsIndex), path.join(path.dirname(cjsIndex), "..", "..")],
-      });
-      return await import(/*turbopackIgnore: true*/ "file://" + pdfjsLegacyPath);
+      // @ts-ignore - Dynamic server import
+      return await import(/*turbopackIgnore: true*/ "pdfjs-dist/legacy/build/pdf.mjs");
     } catch {
       return null;
     }
