@@ -147,6 +147,32 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
   const resultAudioRef = useRef<HTMLAudioElement>(null);
   const [resultVideoTime, setResultVideoTime] = useState<number>(0);
 
+  // Bottom player container ref & scale calculation untuk kanvas hasil generate
+  const resultPlayerContainerRef = useRef<HTMLDivElement>(null);
+  const [resultPlayerWidth, setResultPlayerWidth] = useState<number>(800);
+
+  useEffect(() => {
+    if (!resultPlayerContainerRef.current) return;
+    const updateSize = () => {
+      if (resultPlayerContainerRef.current) {
+        const w = resultPlayerContainerRef.current.clientWidth;
+        if (w > 0) setResultPlayerWidth(w);
+      }
+    };
+    updateSize();
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect.width > 0) {
+          setResultPlayerWidth(entry.contentRect.width);
+        }
+      }
+    });
+    ro.observe(resultPlayerContainerRef.current);
+    return () => ro.disconnect();
+  }, [timelineResult]);
+
+  const resultScale = Math.max(0.2, resultPlayerWidth / 1280);
+
   // Cari segmen aktif pada detik video hasil generate (bottom player)
   const activeSegmentAtResultTime = React.useMemo(() => {
     for (const s of segments) {
@@ -927,141 +953,34 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
                     />
                   )}
 
-                  {/* Real-time Subtitle Overlay on Video Player (Proporsional 1:1 dengan Kanvas 1280x720) */}
+                  {/* Real-time Subtitle Overlay on Video Player (Selalu di Bawah Tengah & Responsif) */}
                   {burnSubtitles &&
                     showLiveSubtitleOnPlayer &&
                     (activePlayerMode === "original" ||
                       (activePlayerMode === "dubbed" && !timelineResult?.dubbedVideoUrl)) && (
-                    <div className="absolute inset-0 pointer-events-none overflow-hidden select-none z-10">
-                      <div
-                        style={{
-                          position: "absolute",
-                          top: 0,
-                          left: 0,
-                          width: "1280px",
-                          height: "720px",
-                          transform: `scale(${previewScale})`,
-                          transformOrigin: "top left",
-                          display: "flex",
-                          flexDirection: "column",
-                          justifyContent: "flex-end",
-                          alignItems: "center",
-                          paddingBottom: `${subtitleYpad}px`,
-                          paddingLeft: "70px",
-                          paddingRight: "70px",
-                          boxSizing: "border-box",
-                        }}
-                      >
-                        {effectiveSubtitleText && (
-                          <div
-                            style={{
-                              fontSize: `${subtitleFontSize}px`,
-                              fontWeight: "bold",
-                              lineHeight: 1.25,
-                              textAlign: "center",
-                              maxWidth: "1140px",
-                              fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
-                              letterSpacing: "0.01em",
-                              ...(subtitleStyle === "shaded_box"
-                                ? {
-                                    color: "#ffffff",
-                                    backgroundColor: "rgba(11, 19, 43, 0.90)",
-                                    padding: "6px 18px",
-                                    borderRadius: "6px",
-                                    boxShadow: "0 6px 18px rgba(0, 0, 0, 0.6)",
-                                  }
-                                : subtitleStyle === "yellow_outline"
-                                ? {
-                                    color: "#ffff00",
-                                    textShadow:
-                                      "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 3px 6px rgba(0,0,0,0.8)",
-                                  }
-                                : {
-                                    color: "#ffffff",
-                                    textShadow:
-                                      "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 3px 6px rgba(0,0,0,0.8)",
-                                  }),
-                            }}
-                          >
-                            {effectiveSubtitleText}
-                          </div>
-                        )}
-
-                        {/* Safe Margin Guide Line in 1280x720 canvas coordinates */}
-                        <div
-                          style={{
-                            position: "absolute",
-                            bottom: `${subtitleYpad}px`,
-                            left: "40px",
-                            right: "40px",
-                            borderBottom: "1.5px dashed rgba(59, 130, 246, 0.5)",
-                            display: "flex",
-                            justifyContent: "space-between",
-                            fontSize: "14px",
-                            color: "#60a5fa",
-                            fontFamily: "monospace",
-                            fontWeight: "bold",
-                            paddingBottom: "3px",
-                          }}
-                        >
-                          <span>Safe Margin ({subtitleYpad}px)</span>
-                          <span>Font: {subtitleFontSize}px (720p 1:1 WYSIWYG)</span>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            ) : (
-              /* Sleek 16:9 Canvas Preview if no video loaded yet */
-              <div className="relative rounded-xl overflow-hidden bg-slate-950 border border-slate-800 aspect-video flex flex-col items-center justify-center p-6 text-center select-none shadow-xl">
-                <div className="space-y-1.5 max-w-sm z-0 opacity-60">
-                  <Film className="w-8 h-8 text-purple-400 mx-auto" />
-                  <p className="text-xs font-semibold text-slate-200">Pratinjau Subtitle (Kanvas Video 16:9)</p>
-                  <p className="text-[11px] text-slate-400 leading-relaxed">
-                    Unggah video acuan atau pilih preset di samping. Tampilan subtitle di bawah diselaraskan 1:1 dengan video final 1280x720.
-                  </p>
-                </div>
-
-                {/* Subtitle overlay on empty canvas */}
-                {burnSubtitles && (
-                  <div className="absolute inset-0 pointer-events-none overflow-hidden select-none z-10">
                     <div
+                      className="absolute inset-x-0 bottom-0 pointer-events-none flex flex-col items-center justify-end z-20 px-4 sm:px-8 select-none"
                       style={{
-                        position: "absolute",
-                        top: 0,
-                        left: 0,
-                        width: "1280px",
-                        height: "720px",
-                        transform: `scale(${previewScale})`,
-                        transformOrigin: "top left",
-                        display: "flex",
-                        flexDirection: "column",
-                        justifyContent: "flex-end",
-                        alignItems: "center",
-                        paddingBottom: `${subtitleYpad}px`,
-                        paddingLeft: "70px",
-                        paddingRight: "70px",
-                        boxSizing: "border-box",
+                        paddingBottom: `${Math.max(8, Math.round(subtitleYpad * previewScale))}px`,
                       }}
                     >
                       {effectiveSubtitleText && (
                         <div
                           style={{
-                            fontSize: `${subtitleFontSize}px`,
+                            fontSize: `${Math.max(12, Math.round(subtitleFontSize * previewScale))}px`,
                             fontWeight: "bold",
                             lineHeight: 1.25,
                             textAlign: "center",
-                            maxWidth: "1140px",
+                            maxWidth: "92%",
                             fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
                             letterSpacing: "0.01em",
                             ...(subtitleStyle === "shaded_box"
                               ? {
                                   color: "#ffffff",
                                   backgroundColor: "rgba(11, 19, 43, 0.90)",
-                                  padding: "6px 18px",
+                                  padding: "4px 14px",
                                   borderRadius: "6px",
-                                  boxShadow: "0 6px 18px rgba(0, 0, 0, 0.6)",
+                                  boxShadow: "0 4px 12px rgba(0, 0, 0, 0.6)",
                                 }
                               : subtitleStyle === "yellow_outline"
                               ? {
@@ -1079,27 +998,83 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
                           {effectiveSubtitleText}
                         </div>
                       )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              /* Sleek 16:9 Canvas Preview if no video loaded yet */
+              <div className="relative rounded-xl overflow-hidden bg-slate-950 border border-slate-800 aspect-video flex flex-col items-center justify-center p-6 text-center select-none shadow-xl">
+                <div className="space-y-1.5 max-w-sm z-0 opacity-60">
+                  <Film className="w-8 h-8 text-purple-400 mx-auto" />
+                  <p className="text-xs font-semibold text-slate-200">Pratinjau Subtitle (Kanvas Video 16:9)</p>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Unggah video acuan atau pilih preset di samping. Tampilan subtitle di bawah diselaraskan 1:1 dengan video final 1280x720.
+                  </p>
+                </div>
 
-                      {/* Safe Margin Guide Line in 1280x720 canvas coordinates */}
+                {/* Subtitle overlay on empty canvas (Selalu di Bawah Tengah) */}
+                {burnSubtitles && (
+                  <div
+                    className="absolute inset-x-0 bottom-0 pointer-events-none flex flex-col items-center justify-end z-20 px-4 sm:px-8 select-none"
+                    style={{
+                      paddingBottom: `${Math.max(8, Math.round(subtitleYpad * previewScale))}px`,
+                    }}
+                  >
+                    {effectiveSubtitleText && (
                       <div
                         style={{
-                          position: "absolute",
-                          bottom: `${subtitleYpad}px`,
-                          left: "40px",
-                          right: "40px",
-                          borderBottom: "1.5px dashed rgba(59, 130, 246, 0.5)",
-                          display: "flex",
-                          justifyContent: "space-between",
-                          fontSize: "14px",
-                          color: "#60a5fa",
-                          fontFamily: "monospace",
+                          fontSize: `${Math.max(12, Math.round(subtitleFontSize * previewScale))}px`,
                           fontWeight: "bold",
-                          paddingBottom: "3px",
+                          lineHeight: 1.25,
+                          textAlign: "center",
+                          maxWidth: "92%",
+                          fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
+                          letterSpacing: "0.01em",
+                          ...(subtitleStyle === "shaded_box"
+                            ? {
+                                color: "#ffffff",
+                                backgroundColor: "rgba(11, 19, 43, 0.90)",
+                                padding: "4px 14px",
+                                borderRadius: "6px",
+                                boxShadow: "0 4px 12px rgba(0, 0, 0, 0.6)",
+                              }
+                            : subtitleStyle === "yellow_outline"
+                            ? {
+                                color: "#ffff00",
+                                textShadow:
+                                  "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 3px 6px rgba(0,0,0,0.8)",
+                              }
+                            : {
+                                color: "#ffffff",
+                                textShadow:
+                                  "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 3px 6px rgba(0,0,0,0.8)",
+                              }),
                         }}
                       >
-                        <span>Safe Margin ({subtitleYpad}px)</span>
-                        <span>Font: {subtitleFontSize}px (720p 1:1 WYSIWYG)</span>
+                        {effectiveSubtitleText}
                       </div>
+                    )}
+
+                    {/* Safe Margin Guide Line */}
+                    <div
+                      style={{
+                        position: "absolute",
+                        bottom: `${Math.max(8, Math.round(subtitleYpad * previewScale))}px`,
+                        left: "20px",
+                        right: "20px",
+                        borderBottom: "1.5px dashed rgba(59, 130, 246, 0.5)",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        fontSize: "10px",
+                        color: "#60a5fa",
+                        fontFamily: "monospace",
+                        fontWeight: "bold",
+                        paddingBottom: "2px",
+                      }}
+                    >
+                      <span>Safe Margin ({subtitleYpad}px)</span>
+                      <span>Font: {subtitleFontSize}px</span>
                     </div>
                   </div>
                 )}
@@ -1444,7 +1419,10 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
               </div>
 
               {/* Pemutar Video Terintegrasi dengan Sinkronisasi Audio Voice Over & Subtitle Overlay */}
-              <div className="relative rounded-lg overflow-hidden bg-black aspect-video max-h-[460px] mx-auto border border-slate-800 flex items-center justify-center">
+              <div
+                ref={resultPlayerContainerRef}
+                className="relative rounded-lg overflow-hidden bg-black aspect-video max-h-[460px] mx-auto border border-slate-800 flex items-center justify-center"
+              >
                 <video
                   ref={resultVideoRef}
                   controls
@@ -1494,63 +1472,48 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
                   />
                 )}
 
-                {/* Subtitle Overlay presisi di atas player hasil */}
+                {/* Subtitle Overlay presisi di atas player hasil (Selalu di Bawah Tengah & Responsif) */}
                 {burnSubtitles && showLiveSubtitleOnPlayer && (
-                  <div className="absolute inset-0 pointer-events-none overflow-hidden select-none z-10">
-                    <div
-                      style={{
-                        position: "absolute",
-                        top: 0,
-                        left: 0,
-                        width: "1280px",
-                        height: "720px",
-                        transform: `scale(${previewScale})`,
-                        transformOrigin: "top left",
-                        display: "flex",
-                        flexDirection: "column",
-                        justifyContent: "flex-end",
-                        alignItems: "center",
-                        paddingBottom: `${subtitleYpad}px`,
-                        paddingLeft: "70px",
-                        paddingRight: "70px",
-                        boxSizing: "border-box",
-                      }}
-                    >
-                      {resultSubtitleText && (
-                        <div
-                          style={{
-                            fontSize: `${subtitleFontSize}px`,
-                            fontWeight: "bold",
-                            lineHeight: 1.25,
-                            textAlign: "center",
-                            maxWidth: "1140px",
-                            fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
-                            letterSpacing: "0.01em",
-                            ...(subtitleStyle === "shaded_box"
-                              ? {
-                                  color: "#ffffff",
-                                  backgroundColor: "rgba(11, 19, 43, 0.90)",
-                                  padding: "6px 18px",
-                                  borderRadius: "6px",
-                                  boxShadow: "0 6px 18px rgba(0, 0, 0, 0.6)",
-                                }
-                              : subtitleStyle === "yellow_outline"
-                              ? {
-                                  color: "#ffff00",
-                                  textShadow:
-                                    "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 3px 6px rgba(0,0,0,0.8)",
-                                }
-                              : {
-                                  color: "#ffffff",
-                                  textShadow:
-                                    "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 3px 6px rgba(0,0,0,0.8)",
-                                }),
-                          }}
-                        >
-                          {resultSubtitleText}
-                        </div>
-                      )}
-                    </div>
+                  <div
+                    className="absolute inset-x-0 bottom-0 pointer-events-none flex flex-col items-center justify-end z-20 px-4 sm:px-8 select-none"
+                    style={{
+                      paddingBottom: `${Math.max(8, Math.round(subtitleYpad * resultScale))}px`,
+                    }}
+                  >
+                    {resultSubtitleText && (
+                      <div
+                        style={{
+                          fontSize: `${Math.max(13, Math.round(subtitleFontSize * resultScale))}px`,
+                          fontWeight: "bold",
+                          lineHeight: 1.25,
+                          textAlign: "center",
+                          maxWidth: "92%",
+                          fontFamily: "'Inter', system-ui, -apple-system, sans-serif",
+                          letterSpacing: "0.01em",
+                          ...(subtitleStyle === "shaded_box"
+                            ? {
+                                color: "#ffffff",
+                                backgroundColor: "rgba(11, 19, 43, 0.90)",
+                                padding: "4px 14px",
+                                borderRadius: "6px",
+                                boxShadow: "0 4px 12px rgba(0, 0, 0, 0.6)",
+                              }
+                            : subtitleStyle === "yellow_outline"
+                            ? {
+                                color: "#ffff00",
+                                textShadow:
+                                  "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 3px 6px rgba(0,0,0,0.8)",
+                              }
+                            : {
+                                color: "#ffffff",
+                                textShadow:
+                                  "-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 3px 6px rgba(0,0,0,0.8)",
+                              }),
+                        }}
+                      >
+                        {resultSubtitleText}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1559,32 +1522,36 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
               <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
                 <div className="text-xs text-slate-400 flex items-center gap-2">
                   <span>💡</span>
-                  <span>Video diputar langsung dengan narasi suara AI & subtitle tersinkronisasi presisi.</span>
+                  <span>Video siap digunakan langsung untuk publikasi atau kebutuhan presentasi Anda.</span>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  {timelineResult.mp3Url && (
-                    <a
-                      href={timelineResult.mp3Url}
-                      download={`${featureName || "timeline_audio"}.mp3`}
-                      className="bg-purple-600 hover:bg-purple-500 text-white px-4 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-md shadow-purple-600/30"
-                    >
-                      <Download className="w-4 h-4" />
-                      Unduh Audio (.MP3)
-                    </a>
-                  )}
-                  <a
-                    href={timelineResult.audioUrl}
-                    download={`${featureName || "timeline_audio"}.wav`}
-                    className="bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 px-4 py-2.5 rounded-xl text-xs font-medium flex items-center justify-center gap-2 transition"
+                  <button
+                    type="button"
+                    onClick={handleRemuxSubtitles}
+                    disabled={isRemuxing}
+                    className="bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 px-4 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-sm"
+                    title="Perbarui subtitle pada video ini mengikuti ukuran font & jarak aman saat ini tanpa menggunakan kuota ElevenLabs"
                   >
-                    <Download className="w-4 h-4 text-blue-400" />
-                    Unduh Audio (.WAV)
+                    {isRemuxing ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+                    ) : (
+                      <RefreshCw className="w-4 h-4 text-amber-400" />
+                    )}
+                    <span>⚡ Perbarui Subtitle ({subtitleFontSize}px) • 0 Token</span>
+                  </button>
+                  <a
+                    href={timelineResult.dubbedVideoUrl || activeVideoUrl || "#"}
+                    download={`${featureName || "video_voiceover_subtitle"}.mp4`}
+                    className="bg-gradient-to-r from-purple-600 via-indigo-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white px-5 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-lg shadow-purple-600/30"
+                  >
+                    <Download className="w-4 h-4" />
+                    Unduh Video Lengkap (.MP4)
                   </a>
                   {timelineResult.srtUrl && (
                     <a
                       href={timelineResult.srtUrl}
                       download={`${featureName || "subtitle"}.srt`}
-                      className="bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 px-4 py-2.5 rounded-xl text-xs font-medium flex items-center justify-center gap-2 transition"
+                      className="bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 px-3.5 py-2.5 rounded-xl text-xs font-medium flex items-center justify-center gap-2 transition"
                     >
                       <Download className="w-4 h-4 text-emerald-400" />
                       Unduh Subtitle (.SRT)

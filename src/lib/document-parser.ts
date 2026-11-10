@@ -743,17 +743,42 @@ export function extractStoryboardFromPagesWords(pagesWords: BboxWord[][]): Story
 
 /**
  * Memuat kelas PDFParse secara aman di lingkungan CommonJS maupun ESM/Serverless (Vercel).
- * pdf-parse v2 menyertakan worker inline data URI secara bawaan,
- * sehingga dapat berjalan 100% in-process tanpa spawning thread worker eksternal di Vercel Lambda.
+ * pdf-parse menyertakan worker inline base64 data URI secara bawaan pada module `pdf-parse/worker`.
+ * Mengonfigurasi `PDFParse.setWorker(worker.getData())` mencegah PDF.js mencari `./pdf.worker.mjs`
+ * di filesystem disk Vercel Lambda sehingga ekstraksi PDF 100% in-process tanpa thread atau file eksternal.
  */
+let cachedPdfParse: any = null;
+
+function setupWorkerIfAvailable(PDFParse: any) {
+  if (!PDFParse || typeof PDFParse.setWorker !== "function") return;
+  try {
+    const worker = require("pdf-parse/worker");
+    if (typeof worker?.getData === "function") {
+      PDFParse.setWorker(worker.getData());
+    }
+  } catch (e) {
+    console.warn("[getPdfParseClass] Warning setting worker data:", e);
+  }
+}
+
 async function getPdfParseClass(): Promise<any> {
+  if (cachedPdfParse) {
+    setupWorkerIfAvailable(cachedPdfParse);
+    return cachedPdfParse;
+  }
   try {
     const mod = await import("pdf-parse");
-    return mod.PDFParse || (mod as any).default?.PDFParse || (mod as any).default || mod;
+    const cls = mod.PDFParse || (mod as any).default?.PDFParse || (mod as any).default || mod;
+    setupWorkerIfAvailable(cls);
+    cachedPdfParse = cls;
+    return cls;
   } catch {
     try {
       const mod = require("pdf-parse");
-      return mod.PDFParse || mod.default?.PDFParse || mod.default || mod;
+      const cls = mod.PDFParse || mod.default?.PDFParse || mod.default || mod;
+      setupWorkerIfAvailable(cls);
+      cachedPdfParse = cls;
+      return cls;
     } catch {
       return null;
     }
