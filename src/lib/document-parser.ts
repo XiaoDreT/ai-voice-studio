@@ -55,6 +55,7 @@ export function isPageFooterOrMeta(text: string): boolean {
   return (
     /^(?:page|halaman|hlm|hal\.?)\s*\d+(\s*(?:of|\/|dari)\s*\d+)?$/i.test(low) ||
     /^\d+\s*(?:of|\/|dari)\s*\d+$/i.test(low) ||
+    /^(?:page|halaman|hlm|hal\.?)$/i.test(low) ||
     /^-\s*\d+\s*-$/.test(low) ||
     /^(?:confidential|rahasia|all rights reserved|hak cipta dilindungi)/i.test(low)
   );
@@ -695,6 +696,7 @@ export function extractStoryboardFromPagesWords(pagesWords: BboxWord[][]): Story
 
     for (const w of words) {
       if (w.ymin <= minY) continue;
+      if (isPageFooterOrMeta(w.text)) continue;
       if (w.xmin < xVisualStart) {
         colTimeW.push(w);
       } else if (w.xmin < xVoStart) {
@@ -749,12 +751,24 @@ export function extractStoryboardFromPagesWords(pagesWords: BboxWord[][]): Story
  */
 let cachedPdfParse: any = null;
 
-function setupWorkerIfAvailable(PDFParse: any) {
+async function setupWorkerIfAvailable(PDFParse: any) {
   if (!PDFParse || typeof PDFParse.setWorker !== "function") return;
   try {
+    const workerMod = await import("pdf-parse/worker");
+    const getData = workerMod.getData || (workerMod as any).default?.getData;
+    if (typeof getData === "function") {
+      PDFParse.setWorker(getData());
+      return;
+    }
+  } catch {
+    // fallback
+  }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const worker = require("pdf-parse/worker");
-    if (typeof worker?.getData === "function") {
-      PDFParse.setWorker(worker.getData());
+    const getData = worker?.getData || worker?.default?.getData;
+    if (typeof getData === "function") {
+      PDFParse.setWorker(getData());
     }
   } catch (e) {
     console.warn("[getPdfParseClass] Warning setting worker data:", e);
@@ -763,20 +777,21 @@ function setupWorkerIfAvailable(PDFParse: any) {
 
 async function getPdfParseClass(): Promise<any> {
   if (cachedPdfParse) {
-    setupWorkerIfAvailable(cachedPdfParse);
+    await setupWorkerIfAvailable(cachedPdfParse);
     return cachedPdfParse;
   }
   try {
     const mod = await import("pdf-parse");
     const cls = mod.PDFParse || (mod as any).default?.PDFParse || (mod as any).default || mod;
-    setupWorkerIfAvailable(cls);
+    await setupWorkerIfAvailable(cls);
     cachedPdfParse = cls;
     return cls;
   } catch {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const mod = require("pdf-parse");
       const cls = mod.PDFParse || mod.default?.PDFParse || mod.default || mod;
-      setupWorkerIfAvailable(cls);
+      await setupWorkerIfAvailable(cls);
       cachedPdfParse = cls;
       return cls;
     } catch {

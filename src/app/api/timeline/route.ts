@@ -85,12 +85,12 @@ async function muxDubbedVideo(opts: MuxDubbedOptions): Promise<boolean> {
     .replace(/:/g, "\\:")
     .replace(/'/g, "\\'");
 
-  const shouldBurn = burnSubtitles !== false;
+  const shouldBurn = burnSubtitles !== false && fs.existsSync(savedAssPath);
   const subFilter = shouldBurn ? `ass='${escapedAssPath}'` : "";
 
   let ffmpegArgs: string[] = [];
 
-  if (resolvedVPath) {
+  if (resolvedVPath && fs.existsSync(resolvedVPath)) {
     const vf = subFilter
       ? `scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,${subFilter}`
       : `scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black`;
@@ -113,40 +113,67 @@ async function muxDubbedVideo(opts: MuxDubbedOptions): Promise<boolean> {
       outDubPath,
     ];
   } else {
-    // Tanpa file video fisik di filesystem server, jangan buat video dummy layar biru.
-    // Pemutar di browser client memutar video lokal user secara instan & presisi dengan audio voice over AI & subtitle overlay.
-    return false;
+    // Tanpa video acuan fisik, buat video 1280x720 elegan berlatar gelap dengan audio & subtitle utuh
+    const vf = subFilter || "null";
+    ffmpegArgs = [
+      "-y",
+      "-threads", "2",
+      "-f", "lavfi",
+      "-i", `color=c=0x0b0f19:s=1280x720:d=${totalDurationSec}:r=25`,
+      "-i", savedAudioPath,
+      "-vf", vf,
+      "-c:v", "libx264",
+      "-preset", "ultrafast",
+      "-pix_fmt", "yuv420p",
+      "-c:a", "aac",
+      "-b:a", "128k",
+      "-map", "0:v:0",
+      "-map", "1:a:0",
+      "-t", String(totalDurationSec),
+      outDubPath,
+    ];
   }
 
-  return new Promise<boolean>((resolve) => {
-    const proc = spawn(/*turbopackIgnore: true*/ ffmpegBin, ffmpegArgs);
-    let stderr = "";
-    proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
+  const runFfmpeg = (args: string[]) =>
+    new Promise<boolean>((resolve) => {
+      const proc = spawn(/*turbopackIgnore: true*/ ffmpegBin, args);
+      let stderr = "";
+      proc.stderr.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
 
-    const timeout = setTimeout(() => {
-      proc.kill("SIGKILL");
-      console.error("FFmpeg render timed out after 180s");
-      resolve(false);
-    }, 180000);
-
-    proc.on("close", (code) => {
-      clearTimeout(timeout);
-      if (code === 0 && fs.existsSync(outDubPath) && fs.statSync(outDubPath).size > 0) {
-        resolve(true);
-      } else {
-        console.error("FFmpeg error exit code:", code, stderr.slice(-400));
+      const timeout = setTimeout(() => {
+        proc.kill("SIGKILL");
+        console.error("FFmpeg render timed out after 180s");
         resolve(false);
-      }
+      }, 180000);
+
+      proc.on("close", (code) => {
+        clearTimeout(timeout);
+        if (code === 0 && fs.existsSync(outDubPath) && fs.statSync(outDubPath).size > 0) {
+          resolve(true);
+        } else {
+          console.error("FFmpeg error exit code:", code, stderr.slice(-400));
+          resolve(false);
+        }
+      });
+
+      proc.on("error", (err) => {
+        clearTimeout(timeout);
+        console.error("FFmpeg process spawn error:", err);
+        resolve(false);
+      });
     });
 
-    proc.on("error", (err) => {
-      clearTimeout(timeout);
-      console.error("FFmpeg process spawn error:", err);
-      resolve(false);
-    });
-  });
+  let ok = await runFfmpeg(ffmpegArgs);
+  // Fallback tanpa filter ASS jika sistem mengalami kendala font libass
+  if (!ok && subFilter) {
+    console.warn("[muxDubbedVideo] Gagal dengan filter ASS, mencoba remux dasar...");
+    const fallbackArgs = ffmpegArgs.filter((a, idx) => a !== "-vf" && ffmpegArgs[idx - 1] !== "-vf");
+    ok = await runFfmpeg(fallbackArgs);
+  }
+
+  return ok;
 }
 
 export async function POST(request: Request) {
@@ -228,27 +255,25 @@ export async function POST(request: Request) {
 
       let dubbedVideoUrl: string | undefined;
 
-      if (resolvedVPath) {
-        const audioStat = fs.statSync(/*turbopackIgnore: true*/ savedAudioPath);
-        const totalDurationSec = Math.max(
-          1,
-          Number(((audioStat.size - 44) / (24000 * 2)).toFixed(2))
-        );
+      const audioStat = fs.statSync(/*turbopackIgnore: true*/ savedAudioPath);
+      const totalDurationSec = Math.max(
+        1,
+        Number(((audioStat.size - 44) / (24000 * 2)).toFixed(2))
+      );
 
-        const ok = await muxDubbedVideo({
-          ffmpegBin,
-          savedAudioPath,
-          savedAssPath,
-          resolvedVPath,
-          outDubPath,
-          totalDurationSec,
-          burnSubtitles,
-        });
+      const ok = await muxDubbedVideo({
+        ffmpegBin,
+        savedAudioPath,
+        savedAssPath,
+        resolvedVPath,
+        outDubPath,
+        totalDurationSec,
+        burnSubtitles,
+      });
 
-        if (ok) {
-          dubbedVideoUrl = `/api/files/${dubbedFileName}`;
-          updateHistoryItem(baseName, { video_url: dubbedVideoUrl });
-        }
+      if (ok) {
+        dubbedVideoUrl = `/api/files/${dubbedFileName}`;
+        updateHistoryItem(baseName, { video_url: dubbedVideoUrl });
       }
 
       return NextResponse.json({
@@ -380,25 +405,23 @@ export async function POST(request: Request) {
 
     let dubbedVideoUrl: string | undefined;
 
-    // 3. Gabungkan (mux/dubbing) video acuan jika ada file fisik di server
+    // 3. Gabungkan (mux/dubbing) video acuan jika ada file fisik di server, atau buat video presentasi lengkap
     const resolvedVPath = resolveVideoPath(videoPath);
     const dubbedFileName = `${baseName}_dubbed.mp4`;
     const outDubPath = path.join(getOutputDir(), dubbedFileName);
 
-    if (resolvedVPath) {
-      const dubbedOk = await muxDubbedVideo({
-        ffmpegBin,
-        savedAudioPath,
-        savedAssPath,
-        resolvedVPath,
-        outDubPath,
-        totalDurationSec: tlResult.totalTimelineSec,
-        burnSubtitles,
-      });
+    const dubbedOk = await muxDubbedVideo({
+      ffmpegBin,
+      savedAudioPath,
+      savedAssPath,
+      resolvedVPath,
+      outDubPath,
+      totalDurationSec: tlResult.totalTimelineSec,
+      burnSubtitles,
+    });
 
-      if (dubbedOk) {
-        dubbedVideoUrl = `/api/files/${dubbedFileName}`;
-      }
+    if (dubbedOk) {
+      dubbedVideoUrl = `/api/files/${dubbedFileName}`;
     }
 
     const fullScriptSummary = tlResult.segmentReports
