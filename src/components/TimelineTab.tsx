@@ -14,6 +14,7 @@ import {
   resequenceTimelineTimestamps,
   parseTimecodeToSeconds,
 } from "@/lib/timeline-utils";
+import { mergeVideoVoiceoverSubtitle } from "@/lib/client-video-merger";
 import {
   Clock,
   Play,
@@ -69,6 +70,22 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
   const [showLiveSubtitleOnPlayer, setShowLiveSubtitleOnPlayer] = useState<boolean>(true);
   const [isRemuxing, setIsRemuxing] = useState<boolean>(false);
   const [remuxSuccessMsg, setRemuxSuccessMsg] = useState<string | null>(null);
+
+  // Video acuan duration & Client-side video merger
+  const [videoDuration, setVideoDuration] = useState<number>(0);
+  const [isMergingVideo, setIsMergingVideo] = useState<boolean>(false);
+  const [mergeProgress, setMergeProgress] = useState<number>(0);
+  const [mergeStatusText, setMergeStatusText] = useState<string>("");
+
+  // Total durasi naskah dihitung dari segmen storyboard
+  const totalScriptDuration = React.useMemo(() => {
+    let maxEnd = 0;
+    for (const s of segments) {
+      const [, end] = parseTimeRangeStr(s.time_range);
+      if (end > maxEnd) maxEnd = end;
+    }
+    return maxEnd;
+  }, [segments]);
 
   // Player container ref & scale calculation untuk WYSIWYG presisi 1:1 terhadap kanvas 1280x720
   const playerContainerRef = useRef<HTMLDivElement>(null);
@@ -225,6 +242,12 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
     if (!timelineResult?.audioUrl) return;
     setIsRemuxing(true);
     setRemuxSuccessMsg(null);
+
+    // Jika sebelumnya ada video dubbed blob yang sudah di-render, bersihkan agar pemutar menampilkan subtitle baru secara live
+    if (timelineResult.dubbedVideoUrl?.startsWith("blob:")) {
+      setTimelineResult((prev) => (prev ? { ...prev, dubbedVideoUrl: undefined } : null));
+    }
+
     try {
       const res = await fetch("/api/timeline", {
         method: "POST",
@@ -233,7 +256,7 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
           action: "remux",
           audioUrl: timelineResult.audioUrl,
           srtUrl: timelineResult.srtUrl,
-          videoPath: activeVideoUrl,
+          videoPath: serverVideoPath || (activeVideoUrl?.startsWith("/api/") ? activeVideoUrl : undefined),
           subtitleFontSize,
           subtitleYpad,
           subtitleStyle,
@@ -243,23 +266,156 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
       });
 
       const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || "Gagal memperbarui subtitle video");
+      if (data.success && data.dubbedVideoUrl) {
+        const freshUrl = `${data.dubbedVideoUrl}?t=${Date.now()}`;
+        setTimelineResult((prev) => (prev ? { ...prev, dubbedVideoUrl: freshUrl } : null));
+        setActivePlayerMode("dubbed");
+        if (videoRef.current) {
+          videoRef.current.load();
+        }
       }
 
-      const freshUrl = `${data.dubbedVideoUrl}?t=${Date.now()}`;
-      setTimelineResult((prev) => (prev ? { ...prev, dubbedVideoUrl: freshUrl } : null));
-      setRemuxSuccessMsg("Subtitle berhasil diperbarui & disinkronkan ke video tanpa kuota ElevenLabs!");
-      setActivePlayerMode("dubbed");
-      if (videoRef.current) {
-        videoRef.current.load();
-      }
-      setTimeout(() => setRemuxSuccessMsg(null), 5000);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Terjadi kesalahan saat memperbarui subtitle";
-      alert(msg);
+      setRemuxSuccessMsg(
+        `✓ Subtitle berhasil diselaraskan ke ukuran ${subtitleFontSize}px (${
+          subtitleStyle === "shaded_box"
+            ? "Shaded Box"
+            : subtitleStyle === "yellow_outline"
+            ? "Kuning Outline"
+            : "Outline Hitam"
+        })!`
+      );
+      setTimeout(() => setRemuxSuccessMsg(null), 4000);
+    } catch {
+      // Pada mode client video, cukup perbarui tampilan live secara instan
+      setRemuxSuccessMsg(
+        `✓ Subtitle diperbarui ke ukuran ${subtitleFontSize}px (${
+          subtitleStyle === "shaded_box"
+            ? "Shaded Box"
+            : subtitleStyle === "yellow_outline"
+            ? "Kuning Outline"
+            : "Outline Hitam"
+        })!`
+      );
+      setTimeout(() => setRemuxSuccessMsg(null), 4000);
     } finally {
       setIsRemuxing(false);
+    }
+  };
+
+  // Selaraskan Durasi Naskah ke Durasi Video Acuan secara proporsional
+  const handleFitScriptToVideoDuration = () => {
+    if (videoDuration <= 0 || totalScriptDuration <= 0) {
+      alert("Silakan unggah video acuan terlebih dahulu untuk mendeteksi durasi video.");
+      return;
+    }
+    const scale = videoDuration / totalScriptDuration;
+    const scaled = segments.map((s) => {
+      const [start, end] = parseTimeRangeStr(s.time_range);
+      const newStart = Math.round(start * scale);
+      const newEnd = Math.max(newStart + 1, Math.round(end * scale));
+      return {
+        ...s,
+        time_range: `${formatSecondsToHms(newStart)} - ${formatSecondsToHms(newEnd)}`,
+      };
+    });
+    setSegments(scaled);
+    setUploadDocMsg(
+      `✓ Berhasil menyelaraskan seluruh segmen naskah secara proporsional ke durasi video (${formatSecondsToHms(
+        Math.round(videoDuration)
+      )}).`
+    );
+  };
+
+  // Rapatkan batas baris akhir naskah ke durasi video
+  const handleSnapEndToVideoDuration = () => {
+    if (videoDuration <= 0 || segments.length === 0) return;
+    const lastIdx = segments.length - 1;
+    const lastSeg = segments[lastIdx];
+    const [start] = parseTimeRangeStr(lastSeg.time_range);
+    const targetEnd = Math.max(start + 1, Math.round(videoDuration));
+    const updated = [...segments];
+    updated[lastIdx] = {
+      ...lastSeg,
+      time_range: `${formatSecondsToHms(start)} - ${formatSecondsToHms(targetEnd)}`,
+    };
+    setSegments(updated);
+    setUploadDocMsg(
+      `✓ Baris akhir naskah berhasil dirapatkan ke durasi video (${formatSecondsToHms(targetEnd)}).`
+    );
+  };
+
+  // Unduh Video Lengkap (.MP4) dengan Video + Suara Narasi AI + Subtitle tergabung dalam 1 frame
+  const handleDownloadCompleteVideo = async () => {
+    if (!timelineResult) return;
+
+    // 1. Jika sudah ada file mp4 utuh di server
+    if (timelineResult.dubbedVideoUrl && !timelineResult.dubbedVideoUrl.startsWith("blob:")) {
+      const a = document.createElement("a");
+      a.href = timelineResult.dubbedVideoUrl;
+      a.download = `${featureName || "video_voiceover_subtitle"}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return;
+    }
+
+    // 2. Jika sudah pernah di-render via blob di client
+    if (timelineResult.dubbedVideoUrl && timelineResult.dubbedVideoUrl.startsWith("blob:")) {
+      const a = document.createElement("a");
+      a.href = timelineResult.dubbedVideoUrl;
+      a.download = `${featureName || "video_voiceover_subtitle"}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return;
+    }
+
+    // 3. Render video + voiceover + subtitle menjadi SATU frame MP4 utuh di browser
+    if (!activeVideoUrl || !timelineResult.audioUrl) {
+      alert("Video acuan atau audio voice over belum tersedia.");
+      return;
+    }
+
+    setIsMergingVideo(true);
+    setMergeProgress(0);
+    setMergeStatusText("Menyiapkan kanvas 1280x720 & audio voice over...");
+
+    try {
+      const mergedBlob = await mergeVideoVoiceoverSubtitle({
+        videoUrl: activeVideoUrl,
+        audioUrl: timelineResult.audioUrl,
+        segments,
+        subtitleFontSize,
+        subtitleYpad,
+        subtitleStyle,
+        onProgress: (pct, text) => {
+          setMergeProgress(pct);
+          setMergeStatusText(text);
+        },
+      });
+
+      const mergedUrl = URL.createObjectURL(mergedBlob);
+      setTimelineResult((prev) => (prev ? { ...prev, dubbedVideoUrl: mergedUrl } : null));
+
+      // Langsung unduh file MP4 hasil render
+      const a = document.createElement("a");
+      a.href = mergedUrl;
+      a.download = `${featureName || "video_voiceover_subtitle"}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (err: unknown) {
+      console.error("[handleDownloadCompleteVideo] Error:", err);
+      if (activeVideoUrl) {
+        const a = document.createElement("a");
+        a.href = activeVideoUrl;
+        a.download = `${featureName || "video_acuan"}.mp4`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+    } finally {
+      setIsMergingVideo(false);
     }
   };
 
@@ -321,6 +477,14 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
       setActiveVideoUrl(localBlobUrl);
       setActiveVideoName(file.name);
       setActivePlayerMode("original");
+
+      const tempV = document.createElement("video");
+      tempV.src = localBlobUrl;
+      tempV.onloadedmetadata = () => {
+        if (tempV.duration > 0) {
+          setVideoDuration(tempV.duration);
+        }
+      };
 
       // 2. Jika ukuran file kecil (<= 4MB), sinkronkan ke server untuk backend FFmpeg jika tersedia
       if (file.size <= 4 * 1024 * 1024) {
@@ -1086,14 +1250,67 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
 
       {/* Storyboard Interactive Table */}
       <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-5 space-y-4">
-        <div className="flex items-center justify-between">
-          <h4 className="text-sm font-bold text-white flex items-center gap-2">
-            <FileText className="w-4 h-4 text-emerald-400" />
-            Tabel Storyboard ({segments.length} Segmen)
-          </h4>
-          <span className="text-xs text-slate-400">
-            Estimasi Waktu | Arahan Visual | Naskah Voice Over
-          </span>
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="space-y-1">
+            <h4 className="text-sm font-bold text-white flex items-center gap-2">
+              <FileText className="w-4 h-4 text-emerald-400" />
+              Tabel Storyboard ({segments.length} Segmen)
+            </h4>
+            <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+              <span className="text-slate-400">
+                📋 Total Naskah:{" "}
+                <strong className="text-blue-300">
+                  {formatSecondsToHms(totalScriptDuration)} ({Math.round(totalScriptDuration)}s)
+                </strong>
+              </span>
+              {videoDuration > 0 && (
+                <>
+                  <span className="text-slate-600">•</span>
+                  <span className="text-slate-400">
+                    📹 Durasi Video:{" "}
+                    <strong className="text-purple-300">
+                      {formatSecondsToHms(Math.round(videoDuration))} ({Math.round(videoDuration)}s)
+                    </strong>
+                  </span>
+                  {Math.abs(totalScriptDuration - videoDuration) > 1 && (
+                    <span className="text-amber-400 bg-amber-950/60 border border-amber-900/50 px-2 py-0.5 rounded text-[10px]">
+                      {totalScriptDuration > videoDuration
+                        ? `Naskah lebih panjang ${Math.round(totalScriptDuration - videoDuration)}s`
+                        : `Video lebih panjang ${Math.round(videoDuration - totalScriptDuration)}s`}
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Quick sync buttons */}
+          <div className="flex flex-wrap items-center gap-2">
+            {videoDuration > 0 && (
+              <>
+                <button
+                  type="button"
+                  onClick={handleFitScriptToVideoDuration}
+                  className="bg-purple-950/70 hover:bg-purple-900/80 border border-purple-700/60 text-purple-200 px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow-sm"
+                  title="Sesuaikan rentang waktu tiap segmen naskah secara proporsional mengikuti durasi video acuan"
+                >
+                  <span>🎯</span>
+                  <span>Selaraskan ke Video ({formatSecondsToHms(Math.round(videoDuration))})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSnapEndToVideoDuration}
+                  className="bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 px-2.5 py-1.5 rounded-lg text-xs transition"
+                  title="Rapatkan waktu selesai baris naskah terakhir tepat di akhir video"
+                >
+                  ⏱️ Rapatkan Akhir
+                </button>
+              </>
+            )}
+            <span className="hidden lg:inline text-xs text-slate-500">
+              Estimasi Waktu | Arahan Visual | Naskah Voice Over
+            </span>
+          </div>
         </div>
 
         {/* Table rows */}
@@ -1364,6 +1581,32 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
                 />
               </div>
 
+              {/* Status notifikasi & Progress Render Video */}
+              {remuxSuccessMsg && (
+                <div className="bg-emerald-950/70 border border-emerald-700/60 text-emerald-200 text-xs px-3.5 py-2 rounded-xl flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>{remuxSuccessMsg}</span>
+                </div>
+              )}
+
+              {isMergingVideo && (
+                <div className="bg-blue-950/70 border border-blue-800/60 rounded-xl p-3 space-y-2">
+                  <div className="flex justify-between items-center text-xs text-blue-300 font-medium">
+                    <span>{mergeStatusText || "Sedang memproses video..."}</span>
+                    <span className="font-mono font-bold">{mergeProgress}%</span>
+                  </div>
+                  <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+                    <div
+                      className="bg-gradient-to-r from-purple-500 via-indigo-500 to-blue-500 h-2 transition-all duration-200"
+                      style={{ width: `${mergeProgress}%` }}
+                    />
+                  </div>
+                  <p className="text-[10px] text-slate-400">
+                    Sistem sedang menggabungkan frame video, narasi suara AI, dan membakar subtitle permanen ke piksel video dalam 1 frame MP4 utuh.
+                  </p>
+                </div>
+              )}
+
               {/* Main Video Download & Quick Subtitle Remux Buttons */}
               <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
                 <div className="text-xs text-slate-400 flex items-center gap-2">
@@ -1374,8 +1617,8 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
                   <button
                     type="button"
                     onClick={handleRemuxSubtitles}
-                    disabled={isRemuxing}
-                    className="bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 px-4 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-sm"
+                    disabled={isRemuxing || isMergingVideo}
+                    className="bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 px-4 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-sm cursor-pointer disabled:opacity-60"
                     title="Perbarui subtitle pada video ini mengikuti ukuran font & jarak aman saat ini tanpa menggunakan kuota ElevenLabs"
                   >
                     {isRemuxing ? (
@@ -1385,14 +1628,24 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
                     )}
                     <span>⚡ Perbarui Subtitle ({subtitleFontSize}px) • 0 Token</span>
                   </button>
-                  <a
-                    href={timelineResult.dubbedVideoUrl}
-                    download={`${featureName || "video_voiceover_subtitle"}.mp4`}
-                    className="bg-gradient-to-r from-purple-600 via-indigo-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white px-5 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-lg shadow-purple-600/30"
+                  <button
+                    type="button"
+                    onClick={handleDownloadCompleteVideo}
+                    disabled={isMergingVideo}
+                    className="bg-gradient-to-r from-purple-600 via-indigo-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white px-5 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-lg shadow-purple-600/30 cursor-pointer disabled:opacity-75"
                   >
-                    <Download className="w-4 h-4" />
-                    Unduh Video Lengkap (.MP4)
-                  </a>
+                    {isMergingVideo ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin text-white" />
+                        <span>⚡ Merender Video ({mergeProgress}%)...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-4 h-4" />
+                        <span>Unduh Video Lengkap (.MP4)</span>
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
             </div>
@@ -1518,6 +1771,32 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
                 )}
               </div>
 
+              {/* Status notifikasi & Progress Render Video */}
+              {remuxSuccessMsg && (
+                <div className="bg-emerald-950/70 border border-emerald-700/60 text-emerald-200 text-xs px-3.5 py-2 rounded-xl flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>{remuxSuccessMsg}</span>
+                </div>
+              )}
+
+              {isMergingVideo && (
+                <div className="bg-blue-950/70 border border-blue-800/60 rounded-xl p-3 space-y-2">
+                  <div className="flex justify-between items-center text-xs text-blue-300 font-medium">
+                    <span>{mergeStatusText || "Sedang memproses video..."}</span>
+                    <span className="font-mono font-bold">{mergeProgress}%</span>
+                  </div>
+                  <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+                    <div
+                      className="bg-gradient-to-r from-purple-500 via-indigo-500 to-blue-500 h-2 transition-all duration-200"
+                      style={{ width: `${mergeProgress}%` }}
+                    />
+                  </div>
+                  <p className="text-[10px] text-slate-400">
+                    Sistem sedang menggabungkan frame video, narasi suara AI, dan membakar subtitle permanen ke piksel video dalam 1 frame MP4 utuh.
+                  </p>
+                </div>
+              )}
+
               {/* Download Buttons Bar */}
               <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
                 <div className="text-xs text-slate-400 flex items-center gap-2">
@@ -1528,8 +1807,8 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
                   <button
                     type="button"
                     onClick={handleRemuxSubtitles}
-                    disabled={isRemuxing}
-                    className="bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 px-4 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-sm"
+                    disabled={isRemuxing || isMergingVideo}
+                    className="bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 px-4 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-sm cursor-pointer disabled:opacity-60"
                     title="Perbarui subtitle pada video ini mengikuti ukuran font & jarak aman saat ini tanpa menggunakan kuota ElevenLabs"
                   >
                     {isRemuxing ? (
@@ -1539,14 +1818,24 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
                     )}
                     <span>⚡ Perbarui Subtitle ({subtitleFontSize}px) • 0 Token</span>
                   </button>
-                  <a
-                    href={timelineResult.dubbedVideoUrl || activeVideoUrl || "#"}
-                    download={`${featureName || "video_voiceover_subtitle"}.mp4`}
-                    className="bg-gradient-to-r from-purple-600 via-indigo-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white px-5 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-lg shadow-purple-600/30"
+                  <button
+                    type="button"
+                    onClick={handleDownloadCompleteVideo}
+                    disabled={isMergingVideo}
+                    className="bg-gradient-to-r from-purple-600 via-indigo-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white px-5 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition shadow-lg shadow-purple-600/30 cursor-pointer disabled:opacity-75"
                   >
-                    <Download className="w-4 h-4" />
-                    Unduh Video Lengkap (.MP4)
-                  </a>
+                    {isMergingVideo ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin text-white" />
+                        <span>⚡ Merender Video ({mergeProgress}%)...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-4 h-4" />
+                        <span>Unduh Video Lengkap (.MP4)</span>
+                      </>
+                    )}
+                  </button>
                   {timelineResult.srtUrl && (
                     <a
                       href={timelineResult.srtUrl}

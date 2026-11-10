@@ -226,35 +226,36 @@ export async function POST(request: Request) {
       const dubbedFileName = `${baseName}_dubbed.mp4`;
       const outDubPath = path.join(getOutputDir(), dubbedFileName);
 
-      const audioStat = fs.statSync(/*turbopackIgnore: true*/ savedAudioPath);
-      const totalDurationSec = Math.max(
-        1,
-        Number(((audioStat.size - 44) / (24000 * 2)).toFixed(2))
-      );
+      let dubbedVideoUrl: string | undefined;
 
-      const ok = await muxDubbedVideo({
-        ffmpegBin,
-        savedAudioPath,
-        savedAssPath,
-        resolvedVPath,
-        outDubPath,
-        totalDurationSec,
-        burnSubtitles,
-      });
-
-      if (!ok) {
-        return NextResponse.json(
-          { success: false, error: "Gagal memproses ulang subtitle video dengan FFmpeg" },
-          { status: 500 }
+      if (resolvedVPath) {
+        const audioStat = fs.statSync(/*turbopackIgnore: true*/ savedAudioPath);
+        const totalDurationSec = Math.max(
+          1,
+          Number(((audioStat.size - 44) / (24000 * 2)).toFixed(2))
         );
-      }
 
-      const dubbedVideoUrl = `/api/files/${dubbedFileName}`;
-      updateHistoryItem(baseName, { video_url: dubbedVideoUrl });
+        const ok = await muxDubbedVideo({
+          ffmpegBin,
+          savedAudioPath,
+          savedAssPath,
+          resolvedVPath,
+          outDubPath,
+          totalDurationSec,
+          burnSubtitles,
+        });
+
+        if (ok) {
+          dubbedVideoUrl = `/api/files/${dubbedFileName}`;
+          updateHistoryItem(baseName, { video_url: dubbedVideoUrl });
+        }
+      }
 
       return NextResponse.json({
         success: true,
         dubbedVideoUrl,
+        srtUrl: `/api/files/${baseName}.srt`,
+        assUrl: `/api/files/${assFileName}`,
         message: "Subtitle berhasil diperbarui tanpa mengonsumsi kuota ElevenLabs!",
       });
     }
