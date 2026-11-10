@@ -10,6 +10,7 @@ import {
   saveHistoryItem,
   saveOutputFile,
   getOutputFilePath,
+  getOutputDir,
   updateHistoryItem,
 } from "@/lib/history-manager";
 import { StoryboardSegment, FitMode, SubtitleStyle } from "@/types";
@@ -41,12 +42,12 @@ function resolveVideoPath(videoPath?: string): string | null {
   let resolvedVPath: string | null = null;
   if (videoPath.startsWith("/api/files/")) {
     const fname = videoPath.replace("/api/files/", "").split("?")[0];
-    resolvedVPath = getOutputFilePath(fname) || path.join(process.cwd(), "outputs", fname);
+    resolvedVPath = getOutputFilePath(fname) || path.join(getOutputDir(), fname);
   } else if (videoPath.startsWith("/reference_videos/")) {
     resolvedVPath = path.join(process.cwd(), "public", videoPath.slice(1).split("?")[0]);
   } else {
     const clean = videoPath.split("?")[0];
-    const candidate = getOutputFilePath(clean) || path.join(process.cwd(), "outputs", clean);
+    const candidate = getOutputFilePath(clean) || path.join(getOutputDir(), clean);
     if (fs.existsSync(/*turbopackIgnore: true*/ candidate)) {
       resolvedVPath = candidate;
     }
@@ -237,7 +238,7 @@ export async function POST(request: Request) {
       const ffmpegBin = getFfmpegBinary();
       const resolvedVPath = resolveVideoPath(videoPath);
       const dubbedFileName = `${baseName}_dubbed.mp4`;
-      const outDubPath = path.join(process.cwd(), "outputs", dubbedFileName);
+      const outDubPath = path.join(getOutputDir(), dubbedFileName);
 
       const audioStat = fs.statSync(/*turbopackIgnore: true*/ savedAudioPath);
       const totalDurationSec = Math.max(
@@ -363,7 +364,7 @@ export async function POST(request: Request) {
     // 2. Gabungkan (mux/dubbing) video, master audio timeline, dan subtitle dengan FFmpeg
     const resolvedVPath = resolveVideoPath(videoPath);
     const dubbedFileName = `${baseName}_dubbed.mp4`;
-    const outDubPath = path.join(process.cwd(), "outputs", dubbedFileName);
+    const outDubPath = path.join(getOutputDir(), dubbedFileName);
     const ffmpegBin = getFfmpegBinary();
 
     const dubbedOk = await muxDubbedVideo({

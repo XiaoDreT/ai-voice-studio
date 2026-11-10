@@ -137,6 +137,8 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
 
   // Video player ref
   const videoRef = useRef<HTMLVideoElement>(null);
+  const dubbedAudioRef = useRef<HTMLAudioElement>(null);
+  const [serverVideoPath, setServerVideoPath] = useState<string | null>(null);
   const [activePlayerMode, setActivePlayerMode] = useState<"original" | "dubbed">("original");
 
   // Muat hasil generate timeline terakhir dari history saat pertama kali dibuka (jika ada)
@@ -257,32 +259,46 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
     }
   };
 
-  // Upload Reference Video
+  // Upload Reference Video (Aman untuk Vercel Serverless & File Video Ukuran Besar 50MB - 300MB+)
   const handleUploadVideo = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setIsUploadingVideo(true);
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const res = await fetch("/api/upload-video", {
-        method: "POST",
-        body: formData,
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || "Gagal mengunggah video");
-      }
-
-      setActiveVideoUrl(data.videoUrl);
+      // 1. Selalu buat URL objek lokal instan:
+      // - Berjalan instan (0 milidetik, tanpa waktu tunggu upload jaringan)
+      // - Mendukung file video ukuran berapapun (misal 50MB - 500MB+)
+      // - Bebas dari error Vercel 4.5MB Payload Too Large (FUNCTION_PAYLOAD_TOO_LARGE)
+      const localBlobUrl = URL.createObjectURL(file);
+      setActiveVideoUrl(localBlobUrl);
       setActiveVideoName(file.name);
       setActivePlayerMode("original");
+
+      // 2. Jika ukuran file kecil (<= 4MB), sinkronkan ke server untuk backend FFmpeg jika tersedia
+      if (file.size <= 4 * 1024 * 1024) {
+        try {
+          const formData = new FormData();
+          formData.append("file", file);
+          const res = await fetch("/api/upload-video", {
+            method: "POST",
+            body: formData,
+          });
+          const data = await res.json();
+          if (data.success && data.videoUrl) {
+            setServerVideoPath(data.videoUrl);
+          }
+        } catch {
+          // Abaikan kegagalan serverless payload, pemutar lokal tetap berjalan sempurna
+        }
+      } else {
+        setServerVideoPath(null);
+      }
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : "Gagal upload video");
+      console.warn("[handleUploadVideo] Error:", err);
     } finally {
       setIsUploadingVideo(false);
+      e.target.value = "";
     }
   };
 
@@ -320,7 +336,11 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
           subtitleStyle,
           subtitleFontSize,
           subtitleYpad,
-          videoPath: activeVideoUrl,
+          videoPath:
+            serverVideoPath ||
+            (activeVideoUrl?.startsWith("/api/") || activeVideoUrl?.startsWith("/reference_videos/")
+              ? activeVideoUrl
+              : undefined),
         }),
       });
 
@@ -332,6 +352,10 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
       setTimelineResult(data);
       if (data.dubbedVideoUrl) {
         setActivePlayerMode("dubbed");
+      } else if (activeVideoUrl) {
+        setActivePlayerMode("dubbed");
+      } else {
+        setActivePlayerMode("original");
       }
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : "Terjadi kesalahan saat generate");
@@ -771,25 +795,38 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
           <div className="md:w-1/2 flex flex-col justify-center" ref={playerContainerRef}>
             {activeVideoUrl ? (
               <div className="space-y-2">
-                {timelineResult?.dubbedVideoUrl && (
+                {(timelineResult?.dubbedVideoUrl || (activeVideoUrl && timelineResult?.audioUrl)) && (
                   <div className="flex items-center gap-2 text-xs mb-1">
                     <span className="text-slate-400">Mode Tampilan:</span>
                     <button
-                      onClick={() => setActivePlayerMode("dubbed")}
+                      onClick={() => {
+                        setActivePlayerMode("dubbed");
+                        if (dubbedAudioRef.current && videoRef.current) {
+                          dubbedAudioRef.current.currentTime = videoRef.current.currentTime;
+                          if (!videoRef.current.paused) {
+                            dubbedAudioRef.current.play().catch(() => {});
+                          }
+                        }
+                      }}
                       className={`px-2.5 py-1 rounded-lg font-medium transition ${
                         activePlayerMode === "dubbed"
-                          ? "bg-blue-600 text-white"
-                          : "bg-slate-800 text-slate-300"
+                          ? "bg-blue-600 text-white shadow-md shadow-blue-600/30"
+                          : "bg-slate-800 text-slate-300 hover:bg-slate-700"
                       }`}
                     >
-                      🎬 Video Final Dubbing (Suara AI)
+                      🎬 {timelineResult?.dubbedVideoUrl ? "Video Final Dubbing (Suara AI)" : "Video + Suara AI (Voice Over)"}
                     </button>
                     <button
-                      onClick={() => setActivePlayerMode("original")}
+                      onClick={() => {
+                        setActivePlayerMode("original");
+                        if (dubbedAudioRef.current) {
+                          dubbedAudioRef.current.pause();
+                        }
+                      }}
                       className={`px-2.5 py-1 rounded-lg font-medium transition ${
                         activePlayerMode === "original"
-                          ? "bg-blue-600 text-white"
-                          : "bg-slate-800 text-slate-300"
+                          ? "bg-blue-600 text-white shadow-md shadow-blue-600/30"
+                          : "bg-slate-800 text-slate-300 hover:bg-slate-700"
                       }`}
                     >
                       📹 Video Acuan Asli
@@ -800,17 +837,80 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
                   <video
                     ref={videoRef}
                     controls
-                    onTimeUpdate={(e) => setCurrentVideoTime(e.currentTarget.currentTime)}
+                    onTimeUpdate={(e) => {
+                      const cur = e.currentTarget.currentTime;
+                      setCurrentVideoTime(cur);
+                      const isDubbedWithSync =
+                        activePlayerMode === "dubbed" &&
+                        !timelineResult?.dubbedVideoUrl &&
+                        Boolean(timelineResult?.audioUrl);
+                      if (isDubbedWithSync && dubbedAudioRef.current) {
+                        if (Math.abs(dubbedAudioRef.current.currentTime - cur) > 0.3) {
+                          dubbedAudioRef.current.currentTime = cur;
+                        }
+                      }
+                    }}
+                    onPlay={() => {
+                      const isDubbedWithSync =
+                        activePlayerMode === "dubbed" &&
+                        !timelineResult?.dubbedVideoUrl &&
+                        Boolean(timelineResult?.audioUrl);
+                      if (isDubbedWithSync && dubbedAudioRef.current) {
+                        dubbedAudioRef.current.currentTime = videoRef.current?.currentTime || 0;
+                        dubbedAudioRef.current.play().catch(() => {});
+                      }
+                    }}
+                    onPause={() => {
+                      if (dubbedAudioRef.current) {
+                        dubbedAudioRef.current.pause();
+                      }
+                    }}
+                    onSeeked={() => {
+                      const isDubbedWithSync =
+                        activePlayerMode === "dubbed" &&
+                        !timelineResult?.dubbedVideoUrl &&
+                        Boolean(timelineResult?.audioUrl);
+                      if (isDubbedWithSync && dubbedAudioRef.current && videoRef.current) {
+                        dubbedAudioRef.current.currentTime = videoRef.current.currentTime;
+                      }
+                    }}
+                    onVolumeChange={() => {
+                      const isDubbedWithSync =
+                        activePlayerMode === "dubbed" &&
+                        !timelineResult?.dubbedVideoUrl &&
+                        Boolean(timelineResult?.audioUrl);
+                      if (isDubbedWithSync && dubbedAudioRef.current && videoRef.current) {
+                        dubbedAudioRef.current.volume = videoRef.current.volume;
+                      }
+                    }}
                     src={
                       activePlayerMode === "dubbed" && timelineResult?.dubbedVideoUrl
                         ? timelineResult.dubbedVideoUrl
-                        : activeVideoUrl
+                        : activeVideoUrl || undefined
                     }
                     className="w-full h-full object-contain"
+                    muted={Boolean(
+                      activePlayerMode === "dubbed" &&
+                        !timelineResult?.dubbedVideoUrl &&
+                        timelineResult?.audioUrl
+                    )}
                   />
 
+                  {/* Hidden Audio Element untuk Sinkronisasi Suara Voice Over AI secara Real-Time */}
+                  {timelineResult?.audioUrl && (
+                    <audio
+                      ref={dubbedAudioRef}
+                      src={timelineResult.audioUrl}
+                      className="hidden"
+                      preload="auto"
+                    />
+                  )}
+
                   {/* Real-time Subtitle Overlay on Video Player (Proporsional 1:1 dengan Kanvas 1280x720) */}
-                  {burnSubtitles && showLiveSubtitleOnPlayer && activePlayerMode === "original" && (
+                  {burnSubtitles &&
+                    showLiveSubtitleOnPlayer &&
+                    (activePlayerMode === "original" ||
+                      (activePlayerMode === "dubbed" && !timelineResult?.dubbedVideoUrl)) && (
                     <div className="absolute inset-0 pointer-events-none overflow-hidden select-none z-10">
                       <div
                         style={{
@@ -1297,6 +1397,38 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
                     <Download className="w-4 h-4" />
                     Unduh Video Lengkap (.MP4)
                   </a>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Primary Hero ketika Video Acuan diunggah langsung di browser (Client-Side Video & Voice Over Sync) */}
+          {!timelineResult.dubbedVideoUrl && activeVideoUrl && (
+            <div className="bg-slate-950 border border-slate-800 rounded-xl p-5 space-y-3.5 shadow-lg">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-base">🎬</span>
+                  <div>
+                    <h5 className="text-sm font-bold text-white">
+                      Sinkronisasi Video + Suara Narasi AI + Subtitle Aktif
+                    </h5>
+                    <p className="text-[11px] text-slate-400">
+                      Video acuan Anda telah terhubung secara presisi dengan Voice Over AI & subtitle otomatis di pemutar di atas.
+                    </p>
+                  </div>
+                </div>
+                <span className="text-[11px] font-mono bg-emerald-950/60 border border-emerald-800/50 text-emerald-300 px-2.5 py-1 rounded-lg">
+                  ⚡ Live Interactive Sync
+                </span>
+              </div>
+
+              <div className="text-xs bg-slate-900 border border-slate-800 rounded-xl p-4 text-slate-300 flex items-start gap-3">
+                <span className="text-lg">✨</span>
+                <div>
+                  <p className="font-semibold text-white">Pratinjau Instan Berjalan di Pemutar Video Acuan</p>
+                  <p className="text-slate-400 mt-0.5 leading-relaxed">
+                    Pemutar video di atas otomatis beralih ke mode <strong>&ldquo;🎬 Video + Suara AI (Voice Over)&rdquo;</strong> dengan subtitle presisi. Anda dapat memutar video di atas untuk melihat hasilnya secara langsung, atau mengunduh master audio narasi WAV dan file subtitle SRT di bawah untuk kebutuhan editing Anda.
+                  </p>
                 </div>
               </div>
             </div>

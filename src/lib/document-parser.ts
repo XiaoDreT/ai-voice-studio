@@ -3,6 +3,7 @@ import { normalizeToHmsRange, formatSecondsToHms, parseTimecodeToSeconds } from 
 import * as XLSX from "xlsx";
 import mammoth from "mammoth";
 import path from "path";
+import fs from "fs";
 import { spawnSync } from "child_process";
 
 // Regex untuk mendeteksi rentang waktu "00:00:00 - 00:00:05", "00:00 - 00:05", "00:00:00 --> 00:00:05", dll.
@@ -832,27 +833,20 @@ export async function parsePdfStoryboard(buffer: Buffer): Promise<StoryboardSegm
     // Abaikan jika pdftotext tidak tersedia
   }
 
-  // Tier 4: Fallback pustaka JavaScript pdf-parse
+  // Tier 4: Fallback pustaka JavaScript pdf-parse (Aman untuk Vercel / Serverless)
   try {
     const pdfParseModule = await import("pdf-parse");
     const PDFParse = pdfParseModule.PDFParse;
 
     if (PDFParse) {
-      try {
-        const workerPath = path.resolve(
-          process.cwd(),
-          "node_modules/pdf-parse/dist/pdf-parse/cjs/pdf.worker.mjs"
-        );
-        PDFParse.setWorker(workerPath);
-      } catch {
-        // Abaikan jika setWorker tidak dibutuhkan
-      }
-
       const parser = new PDFParse({ data: buffer });
       const textData = await parser.getText();
       const rawText = typeof textData === "string" ? textData : textData?.text || "";
       if (rawText && rawText.trim()) {
-        const parsed = parseRawTimelineText(rawText, false);
+        let parsed = parseRawTimelineText(rawText, false);
+        if (parsed.length === 0) {
+          parsed = parseRawTimelineText(rawText, true); // Fallback auto-assign time range
+        }
         if (parsed.length > 0) {
           return parsed;
         }
@@ -860,6 +854,63 @@ export async function parsePdfStoryboard(buffer: Buffer): Promise<StoryboardSegm
     }
   } catch (e) {
     console.error("[parsePdfStoryboard] pdf-parse fallback error:", e);
+  }
+
+  // Tier 5: Ekstraksi stream string buffer murni (Zero-dependency, 100% tahan banting di lingkungan serverless)
+  try {
+    const rawStr = buffer.toString("latin1");
+    const textChunks: string[] = [];
+
+    // Cari teks di dalam operator Tj
+    const tjRegex = /\(([^)]+)\)\s*Tj/g;
+    let m: RegExpExecArray | null;
+    while ((m = tjRegex.exec(rawStr)) !== null) {
+      const decoded = decodeHtmlAndXmlEntities(m[1].replace(/\\([()\\])/g, "$1"));
+      if (decoded.trim()) textChunks.push(decoded.trim());
+    }
+
+    // Cari teks di dalam operator TJ
+    const tjArrayRegex = /\[([^\]]+)\]\s*TJ/g;
+    while ((m = tjArrayRegex.exec(rawStr)) !== null) {
+      const inner = m[1];
+      const subMatches = inner.match(/\(([^)]+)\)/g);
+      if (subMatches) {
+        const line = subMatches
+          .map((s) => s.slice(1, -1).replace(/\\([()\\])/g, "$1"))
+          .join("");
+        const decoded = decodeHtmlAndXmlEntities(line);
+        if (decoded.trim()) textChunks.push(decoded.trim());
+      }
+    }
+
+    if (textChunks.length === 0) {
+      // Ambil seluruh rangkaian karakter teks printable
+      const printable = rawStr.match(/[\x20-\x7E\r\n\t]{4,}/g);
+      if (printable) {
+        for (const item of printable) {
+          const clean = item.trim();
+          if (
+            !/^(?:obj|endobj|xref|trailer|stream|endstream|\/Type|\/Filter|\/Length|\/Font)/.test(clean) &&
+            clean.length > 2
+          ) {
+            textChunks.push(clean);
+          }
+        }
+      }
+    }
+
+    if (textChunks.length > 0) {
+      const combined = textChunks.join("\n");
+      let parsed = parseRawTimelineText(combined, false);
+      if (parsed.length === 0) {
+        parsed = parseRawTimelineText(combined, true);
+      }
+      if (parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn("[parsePdfStoryboard] Tier 5 pure stream parser error:", err);
   }
 
   // PENTING: Jangan pernah decode buffer binary PDF sebagai string UTF-8!
@@ -901,7 +952,10 @@ export async function parseDocxStoryboard(buffer: Buffer): Promise<StoryboardSeg
     // 2. Fallback: Ekstraksi teks paragraf
     const textResult = await mammoth.extractRawText({ buffer });
     if (textResult && textResult.value) {
-      const textSegments = parseRawTimelineText(textResult.value, false);
+      let textSegments = parseRawTimelineText(textResult.value, false);
+      if (textSegments.length === 0) {
+        textSegments = parseRawTimelineText(textResult.value, true);
+      }
       if (textSegments.length > 0) {
         return textSegments;
       }

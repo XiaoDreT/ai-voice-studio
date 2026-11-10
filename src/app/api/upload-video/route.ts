@@ -18,6 +18,16 @@ export async function POST(request: Request) {
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
+    if (buffer.length > 4.5 * 1024 * 1024) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Ukuran video melebihi batas 4.5MB untuk serverless Vercel. Gunakan pemutar acuan instan langsung di browser.",
+        },
+        { status: 413 }
+      );
+    }
+
     saveOutputFile(safeFileName, buffer);
 
     const videoUrl = `/api/files/${safeFileName}`;
