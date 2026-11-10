@@ -742,16 +742,57 @@ export function extractStoryboardFromPagesWords(pagesWords: BboxWord[][]): Story
 }
 
 /**
+ * Memastikan worker PDF.js dimuat secara in-process di lingkungan serverless (Vercel).
+ */
+async function ensurePdfJsWorker(): Promise<string | null> {
+  if ((globalThis as any).pdfjsWorker?.WorkerMessageHandler) return null;
+
+  const candidatePaths = [
+    path.join(process.cwd(), "src/lib/pdf.worker.mjs"),
+    path.join(__dirname, "pdf.worker.mjs"),
+  ];
+
+  try {
+    const cjsIndex = require.resolve("pdf-parse");
+    candidatePaths.push(path.join(path.dirname(cjsIndex), "pdf.worker.mjs"));
+  } catch {}
+
+  for (const p of candidatePaths) {
+    if (fs.existsSync(/*turbopackIgnore: true*/ p)) {
+      try {
+        (globalThis as any).pdfjsWorker = await import(/*turbopackIgnore: true*/ "file://" + p);
+        return p;
+      } catch {}
+    }
+  }
+
+  return null;
+}
+
+/**
  * Memuat kelas PDFParse secara aman di lingkungan CommonJS maupun ESM/Serverless (Vercel).
  */
 async function getPdfParseClass(): Promise<any> {
+  const workerFile = await ensurePdfJsWorker();
   try {
     const mod = await import("pdf-parse");
-    return mod.PDFParse || (mod as any).default?.PDFParse || (mod as any).default || mod;
+    const cls = mod.PDFParse || (mod as any).default?.PDFParse || (mod as any).default || mod;
+    if (cls && workerFile && typeof cls.setWorker === "function") {
+      try {
+        cls.setWorker(workerFile);
+      } catch {}
+    }
+    return cls;
   } catch {
     try {
       const mod = require("pdf-parse");
-      return mod.PDFParse || mod.default?.PDFParse || mod.default || mod;
+      const cls = mod.PDFParse || mod.default?.PDFParse || mod.default || mod;
+      if (cls && workerFile && typeof cls.setWorker === "function") {
+        try {
+          cls.setWorker(workerFile);
+        } catch {}
+      }
+      return cls;
     } catch {
       return null;
     }
@@ -794,7 +835,7 @@ async function extractPdfStoryboardWithPdfParse(buffer: Buffer): Promise<Storybo
     const PDFParse = await getPdfParseClass();
     if (!PDFParse) return [];
 
-    const parser = new PDFParse({ data: buffer });
+    const parser = new PDFParse({ data: new Uint8Array(buffer) });
     await parser.load();
     const doc = parser.doc;
 

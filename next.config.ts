@@ -5,6 +5,9 @@ const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
   serverExternalPackages: ["pdf-parse", "mammoth", "xlsx", "ffmpeg-static"],
+  outputFileTracingIncludes: {
+    "/api/**/*": ["./src/lib/pdf.worker.mjs"],
+  },
   turbopack: {
     rules: {
       "*.css": {
